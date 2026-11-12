@@ -59,7 +59,9 @@ if [[ -n "${GPUFW:-}" ]]; then
 		[[ -s "$GPUFW/$fw" ]] || { echo "error: $GPUFW/$fw missing" >&2; exit 1; }
 	done
 	gpu_args=(--gpufw "$GPUFW")
-	CMDLINE+=" sweetgpu=1 hotmtl=2 sweetgpufreq=6"
+	# GPU pool reserve for backboardd/SpringBoard (default 160 MB): with v0.8.1's HotMetal2 those two hold
+	# ~750 of 944 MB on raphael, so every other Metal client (keyboard, apps) was refused. GPURESERVE= overrides.
+	CMDLINE+=" sweetgpu=1 hotmtl=2 sweetgpufreq=6 sweetgpureserve=${GPURESERVE:-32}"
 else
 	CMDLINE+=" sweetgpu=0"
 fi
