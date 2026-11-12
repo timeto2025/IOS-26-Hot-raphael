@@ -1,0 +1,43 @@
+From aaa37764a881b03dc8bcfa0dbaf850f2b41b4cba Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Thu, 12 Nov 2026 20:56:46 +0300
+Subject: [PATCH] raphael: GPU pool +368 MB (0xa8800000..0xbf800000)
+
+---
+ bsd/dev/sweet_gpu.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 2ccd010..e0f9df3 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -33,6 +33,10 @@
+ #include "sweet_a6xx.h"
+ #include <sweet_diag.h>
+ #include "../../iokit/Kernel/arm/SweetDisplayMask.h"
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern boolean_t pmap_valid_address(uint64_t pa);
+@@ -1028,6 +1032,15 @@ sweet_gpu_submit_user(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms, ui
+ #define GPOOL_UNIT      0x4000ULL
+ #define GPOOL_FREE_MAX  4096
+ static const struct { uint64_t pa, size; } gpool_ranges[] = {
++#if SWEET_BOARD_RAPHAEL
++	/*
++	 * raphael: HLOS RAM between cdsp_sec_regions (0xa4c00000+60 MB, the last fixed carve-out below the
++	 * ramdisk) and the ABL ramdisk at 0xc0000000, with 8 MB to spare at the top. Nothing there in its
++	 * device trees' reserved-memory; the shim and payload sit below 0x85700000. 944 -> 1312 MB: v0.8.1's
++	 * backboardd + SpringBoard alone peak at ~815 MB on this phone.
++	 */
++	{ 0xa8800000ULL, 0x17000000ULL },       /* 368 MB */
++#endif
+ 	{ 0xc4000000ULL, 0x1c000000ULL },       /* 448 MB (the first 64 MB left to ABL's ramdisk) */
+ 	{ 0xe1000000ULL, 0x1f000000ULL },       /* 496 MB */
+ };
+-- 
+2.43.0
+
