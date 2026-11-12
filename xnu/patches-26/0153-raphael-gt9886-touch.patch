@@ -1,0 +1,700 @@
+From: raphael port <noreply@example.invalid>
+Subject: [PATCH] raphael: Goodix GT9886 touch (original driver)
+
+New bsd/dev/raphael_touch.c for the Redmi K20 Pro / Mi 9T Pro. The GENI I2C
+FIFO, GPIO and report helpers come from IOS-26-Hot's own sweet_touch.c (MIT);
+the board, clock, power and GT9886 protocol code is written for this port from
+hardware facts only (device tree, pinctrl/gcc register maps, GT9886 register map).
+
+- QUP wrapper 2 SE2 @ 0xc88000: votes its clocks, uses the boot firmware's
+  19.2 MHz DFS level, needs the I2C firmware the bootloader loaded
+- pins 57/58 (I2C), reset 54, IRQ 122, load switches 98/100; no PMIC access
+- GT9886 at 0x5d: version block check (PID 9886, sensor ID), doze off,
+  10 ms polling of 0x4100 with zero-sum check and acknowledge
+- sensor 0 is mirrored in both axes; raphtouchflip=N overrides
+- boot-args: raphtouch=0, raphtouchlog=1, raphtouchflip=N, raphtouchdelay=S
+- started from sweet_ufs.c next to rmx1931_touch_init(), raphael builds only
+---
+diff --git a/bsd/conf/files b/bsd/conf/files
+index e083ec3..8dd16d2 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_fts.c			standard
+ bsd/dev/rmx1931_touch.c			standard
++bsd/dev/raphael_touch.c			standard
+ bsd/dev/rmx1931_battery.c		standard
+ bsd/dev/rmx1931_audio.c			standard
+ bsd/dev/rmx1931_torch.c			standard
+diff --git a/bsd/dev/raphael_touch.c b/bsd/dev/raphael_touch.c
+new file mode 100644
+index 0000000..7446c0f
+--- /dev/null
++++ b/bsd/dev/raphael_touch.c
+@@ -0,0 +1,638 @@
++/*
++ * Redmi K20 Pro / Mi 9T Pro (raphael, SM8150): Goodix GT9886 touch for IOS-26-Hot.
++ *
++ * Hardware (facts from the phone's device tree, pinctrl-sm8150 and gcc-sm8150):
++ *   GT9886 at 7-bit 0x5d on QUP wrapper 2 SE2 (QUP19) @ 0x00c88000,
++ *   SDA/SCL = TLMM 57/58 in function 2, reset = 54, IRQ = 122,
++ *   load switches: 98 (VDD) and 100 (AVDD), all pins in the TLMM SOUTH tile.
++ *   Clocks: vote register 0x52014 bits 1 (wrap2 S AHB), 2 (wrap2 M AHB),
++ *   6 (wrap2 S2); S2 RCG 0x1e3a8, S2 branch 0x1e3a4, AHB branches 0x1e004 /
++ *   0x1e008 (the latter may be under hardware clock gating).
++ * GT9886 register map (facts from the Goodix GT9886 interface):
++ *   0x452c version block, 72 bytes summing to zero: product ID "9886" at +9,
++ *   sensor ID in the low nibble of +21.
++ *   0x4100 touch buffer: [0] status (bit 7 = new frame, bit 6 = request from the
++ *   IC), [1] low nibble = point count, then 8 bytes per point (id in the low
++ *   nibble, x and y little endian), then 2 trailing bytes; the bytes from [0]
++ *   through the trailer sum to zero. Writing 0 to 0x4100 acknowledges a frame.
++ *   0x30f0 doze control: write 0xaa, and 0x3100 reads 0xbb once the IC stays awake.
++ *   Sensor 0 panels are mounted mirrored in both axes (DT x2x / y2y).
++ *
++ * The GENI I2C FIFO transfer, GPIO and report helpers below come from IOS-26-Hot's
++ * own bsd/dev/sweet_touch.c (MIT licence, see LICENSE); the raphael board, clock,
++ * power and GT9886 code is new for this port. The only IC writes are the doze
++ * request and the frame acknowledge. No PMIC or regulator access: VDD/AVDD are
++ * board load switches on TLMM GPIOs.
++ *
++ * Boot-args: raphtouch=0 disables it, raphtouchlog=1 prints every frame,
++ * raphtouchflip=N mirrors axes (bit 0 x, bit 1 y; default from the sensor ID),
++ * raphtouchdelay=S seconds before touching the bus (default 20).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
++#if SWEET_BOARD_RAPHAEL
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void raphael_touch_init(void);
++
++/* ---- board ---- */
++#define RT_SE_PA         0x00c88000u
++#define RT_GCC_PA        0x00100000u
++#define RT_SOUTH_PA      0x03d00000u
++#define RT_SOUTH_SIZE    0x7b000u        /* GPIO 0..122 at 4 KiB each */
++#define RT_GCC_VOTE      0x52014u
++#define RT_VOTE_BITS     ((1u << 1) | (1u << 2) | (1u << 6))
++#define RT_RCG           0x1e3a8u
++#define RT_BR_SE         0x1e3a4u
++#define RT_BR_M_AHB      0x1e004u
++#define RT_BR_S_AHB      0x1e008u
++#define RT_PIN_SDA       57u
++#define RT_PIN_SCL       58u
++#define RT_PIN_MUX       2u
++#define RT_PIN_RST       54u
++#define RT_PIN_IRQ       122u
++#define RT_PIN_VDD       98u
++#define RT_PIN_AVDD      100u
++#define RT_W             1080
++#define RT_H             2340
++#define GPIO_CFG(n)      ((uint32_t)(n) * 0x1000u)
++#define GPIO_IO(n)       (GPIO_CFG(n) + 4u)
++
++/* ---- GT9886 ---- */
++#define GT_ADDR          0x5du
++#define GT_VERSION       0x452cu
++#define GT_VERSION_LEN   72u
++#define GT_VER_PID       9u
++#define GT_VER_SENSOR    21u
++#define GT_TOUCH         0x4100u
++#define GT_TOUCH_HDR     2u
++#define GT_POINT_LEN     8u
++#define GT_TRAILER       2u
++#define GT_MAX_POINTS    10u
++#define GT_DOZE_CTRL     0x30f0u
++#define GT_DOZE_STAT     0x3100u
++#define GT_AWAKE_REQ     0xaau
++#define GT_AWAKE_ACK     0xbbu
++#define TOUCH_MAX        10u
++
++/* ---- GENI SE registers (as in sweet_touch.c) ---- */
++#define SE_STATUS       0x040u
++#define SE_MCLK         0x048u
++#define SE_FW           0x068u
++#define SE_CLK_SEL      0x07cu
++#define SE_DMA          0x258u
++#define SE_TX_LEN       0x26cu
++#define SE_RX_LEN       0x270u
++#define SE_SCL          0x278u
++#define SE_CMD          0x600u
++#define SE_CTRL         0x604u
++#define SE_IRQ          0x610u
++#define SE_IRQ_EN       0x614u
++#define SE_IRQ_CLR      0x618u
++#define SE_TX           0x700u
++#define SE_RX           0x780u
++#define SE_TX_COUNT     0x800u
++#define SE_RX_COUNT     0x804u
++#define SE_HW_TX        0xe24u
++#define SE_HW_RX        0xe28u
++#define SE_TX_WM        0x80cu
++#define SE_RX_WM_IRQ    (1u << 26)
++#define SE_RX_LAST      (1u << 27)
++#define SE_TX_WM_IRQ    (1u << 30)
++#define SE_DONE         (1u << 0)
++#define SE_NACK         (1u << 10)
++#define SE_ERRORS       (0x3eu | (1u << 9) | (1u << 10) | (1u << 12) | \
++                         (1u << 13) | (3u << 24) | (3u << 28))
++#define SE_EVENTS       (SE_DONE | SE_ERRORS | SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ)
++#define SE_PACK0        0x0007f8feu
++#define SE_PACK1        0x000ffefeu
++
++static struct {
++	vm_offset_t se, gcc, gpio;
++	bool started, dead, probing;
++	uint32_t irq_status, irq_last, active;
++	unsigned sent, got;
++	unsigned clk_level, sensor, flip, log;
++	int x[TOUCH_MAX], y[TOUCH_MAX];
++} rt;
++static int rt_sleep_chan;
++
++/* ---- generic helpers (from sweet_touch.c) ---- */
++static uint32_t
++rt_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++rt_wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++rt_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&rt_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static bool
++rt_wait_clear(vm_offset_t base, uint32_t off, uint32_t mask)
++{
++	for (unsigned i = 0; i < 5000; ++i) {
++		if (!(rt_rd(base, off) & mask)) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static void
++rt_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
++{
++	uint32_t off = GPIO_CFG(pin);
++	uint32_t cfg = rt_rd(rt.gpio, off);
++	if (out) {
++		rt_wr(rt.gpio, GPIO_IO(pin), (rt_rd(rt.gpio, GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
++	}
++	cfg &= ~0x3ffu;
++	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
++	rt_wr(rt.gpio, off, cfg);
++}
++
++static void
++rt_abort(void)
++{
++	rt_wr(rt.se, SE_CTRL, 2);
++	bool done = false;
++	for (unsigned i = 0; i < 5000; ++i) {
++		if (rt_rd(rt.se, SE_IRQ) & (1u << 5)) {
++			done = true;
++			break;
++		}
++		delay(1);
++	}
++	if (!done || !rt_wait_clear(rt.se, SE_STATUS, 1u)) {
++		rt.dead = true;
++		printf("RAPH TOUCH: abort failed status=%#x irq=%#x; stopping\n",
++		    rt_rd(rt.se, SE_STATUS), rt_rd(rt.se, SE_IRQ));
++	}
++	for (unsigned i = 0; i < 64 && (rt_rd(rt.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
++		(void)rt_rd(rt.se, SE_RX);
++	}
++	rt_wr(rt.se, SE_IRQ_CLR, 0xffffffffu);
++	if (rt_rd(rt.se, SE_TX_COUNT) & 0xfffffffu) {
++		rt.dead = true;
++		printf("RAPH TOUCH: TX FIFO not empty after abort; stopping\n");
++	}
++}
++
++static uint32_t
++rt_irq(void)
++{
++	rt.irq_last = rt_rd(rt.se, SE_IRQ);
++	rt.irq_status |= rt.irq_last;
++	return rt.irq_last;
++}
++
++/* One FIFO message: TX at most 3 bytes or RX at most 90 bytes. */
++static int
++rt_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr, bool stretch)
++{
++	if (rt.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
++		return EIO;
++	}
++	if (!rt_wait_clear(rt.se, SE_STATUS, 1u)) {
++		rt.dead = true;
++		return EBUSY;
++	}
++	rt_wr(rt.se, SE_IRQ_CLR, 0xffffffffu);
++	rt_wr(rt.se, SE_TX_WM, nt ? 1u : 0u);
++	rt_wr(rt.se, nr ? SE_RX_LEN : SE_TX_LEN, nr ? nr : nt);
++	rt_wr(rt.se, SE_CMD, ((nr ? 2u : 1u) << 27) | ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
++	int err = ETIMEDOUT;
++	for (unsigned i = 0; i < 20000; ++i) {
++		uint32_t irq = rt_irq();
++		if (irq & SE_ERRORS) {
++			err = (irq & SE_NACK) ? ENXIO : EIO;
++			for (unsigned j = 0; j < 5000 && !(irq & SE_DONE); ++j) {
++				delay(1);
++				irq = rt_irq();
++			}
++			if ((irq & SE_DONE) && !(rt_rd(rt.se, SE_STATUS) & 1u) &&
++			    !(rt_rd(rt.se, SE_TX_COUNT) & 0xfffffffu) &&
++			    !(rt_rd(rt.se, SE_RX_COUNT) & 0x1ffffffu)) {
++				rt_wr(rt.se, SE_IRQ_CLR, irq);
++				return err;
++			}
++			break;
++		}
++		if (nt && !rt.sent && (irq & SE_TX_WM_IRQ)) {
++			uint32_t word = 0;
++			for (unsigned j = 0; j < nt; ++j) {
++				word |= (uint32_t)tx[j] << (8u * j);
++			}
++			rt_wr(rt.se, SE_TX, word);
++			rt.sent = nt;
++			rt_wr(rt.se, SE_TX_WM, 0);
++		}
++		uint32_t count = rt_rd(rt.se, SE_RX_COUNT) & 0x1ffffffu;
++		if (count > 64 || count > (nr - rt.got + 3u) / 4u) {
++			err = EIO;
++			break;
++		}
++		while (count--) {
++			uint32_t word = rt_rd(rt.se, SE_RX);
++			for (unsigned j = 0; j < 4 && rt.got < nr; ++j) {
++				rx[rt.got++] = (uint8_t)(word >> (8u * j));
++			}
++		}
++		if (irq & SE_DONE) {
++			irq = rt_irq();
++			if (irq & SE_ERRORS) {
++				continue;
++			}
++			rt_wr(rt.se, SE_IRQ_CLR, irq);
++			if (rt.got == nr && rt.sent == nt) {
++				return 0;
++			}
++			err = EIO;
++			break;
++		}
++		rt_wr(rt.se, SE_IRQ_CLR, irq & (SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ));
++		delay(1);
++	}
++	rt_abort();
++	return err;
++}
++
++static int
++rt_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr, bool stretch)
++{
++	rt.irq_status = rt.irq_last = 0;
++	rt.sent = rt.got = 0;
++	int err = rt_msg_run(addr, tx, nt, rx, nr, stretch);
++	if (rt.probing) {
++		printf("RAPH TOUCH: xfer %s len=%u err=%d irq=%#x seen=%#x\n",
++		    nr ? "read" : "write", nr ? nr : nt, err, rt.irq_last, rt.irq_status);
++	}
++	return err;
++}
++
++static void
++rt_report(uint32_t mask, const int *x, const int *y)
++{
++	for (unsigned id = 0; id < TOUCH_MAX; ++id) {
++		uint32_t bit = 1u << id;
++		if (mask & bit) {
++			if (!(rt.active & bit) || x[id] != rt.x[id] || y[id] != rt.y[id]) {
++				sweet_hid_touch((int)id, 1, x[id], y[id]);
++			}
++			rt.x[id] = x[id];
++			rt.y[id] = y[id];
++		} else if (rt.active & bit) {
++			sweet_hid_touch((int)id, 0, rt.x[id], rt.y[id]);
++		}
++	}
++	rt.active = mask;
++}
++
++/* ---- GT9886 register access: 16-bit big-endian register pointer ---- */
++static int
++gt_read(uint16_t reg, uint8_t *buf, unsigned len)
++{
++	const uint8_t ptr[2] = {(uint8_t)(reg >> 8), (uint8_t)reg};
++	int err = rt_msg(GT_ADDR, ptr, sizeof(ptr), NULL, 0, true);
++	return err ? err : rt_msg(GT_ADDR, NULL, 0, buf, len, false);
++}
++
++static int
++gt_write8(uint16_t reg, uint8_t val)
++{
++	const uint8_t msg[3] = {(uint8_t)(reg >> 8), (uint8_t)reg, val};
++	return rt_msg(GT_ADDR, msg, sizeof(msg), NULL, 0, false);
++}
++
++static uint8_t
++gt_sum(const uint8_t *p, unsigned n)
++{
++	uint8_t s = 0;
++	while (n--) {
++		s = (uint8_t)(s + *p++);
++	}
++	return s;
++}
++
++/* Keep the IC out of doze: this driver polls, it never sleeps on the IRQ line. */
++static int
++gt_stay_awake(void)
++{
++	int err = 0;
++	uint8_t stat = 0;
++	for (unsigned attempt = 0; attempt < 10u; ++attempt) {
++		if (attempt == 0 || stat != GT_AWAKE_REQ) {
++			err = gt_write8(GT_DOZE_CTRL, GT_AWAKE_REQ);
++		}
++		rt_wait(attempt ? 10u : 1u);
++		err = gt_read(GT_DOZE_STAT, &stat, 1);
++		if (!err && stat == GT_AWAKE_ACK) {
++			return 0;
++		}
++	}
++	printf("RAPH TOUCH: IC did not confirm awake (doze status %#x, err %d)\n", stat, err);
++	return err ? err : ETIMEDOUT;
++}
++
++static int
++gt_identify(void)
++{
++	uint8_t v[GT_VERSION_LEN];
++	int err = gt_read(GT_VERSION, v, sizeof(v));
++	if (err) {
++		printf("RAPH TOUCH: version read failed %d\n", err);
++		return err;
++	}
++	uint8_t sum = gt_sum(v, sizeof(v));
++	const uint8_t *pid = v + GT_VER_PID;
++	printf("RAPH TOUCH: GT version block sum=%#x pid=%c%c%c%c sensor=%u\n", sum,
++	    pid[0] >= 0x20 && pid[0] < 0x7f ? pid[0] : '?', pid[1] >= 0x20 && pid[1] < 0x7f ? pid[1] : '?',
++	    pid[2] >= 0x20 && pid[2] < 0x7f ? pid[2] : '?', pid[3] >= 0x20 && pid[3] < 0x7f ? pid[3] : '?',
++	    v[GT_VER_SENSOR] & 15u);
++	if (sum != 0 || memcmp(pid, "9886", 4) != 0) {
++		return ENODEV;
++	}
++	rt.sensor = v[GT_VER_SENSOR] & 15u;
++	return 0;
++}
++
++/*
++ * Poll one frame. Header first (2 bytes); only when the IC has a new frame read
++ * the points and trailer, check the zero sum over the whole frame, acknowledge it.
++ */
++static int
++gt_poll(void)
++{
++	uint8_t f[GT_TOUCH_HDR + GT_MAX_POINTS * GT_POINT_LEN + GT_TRAILER];
++	int err = gt_read(GT_TOUCH, f, GT_TOUCH_HDR);
++	if (err) {
++		return err;
++	}
++	if (!(f[0] & 0x80u)) {
++		return 0;               /* nothing new: keep the current contacts */
++	}
++	unsigned n = f[1] & 15u;
++	if (n > GT_MAX_POINTS) {
++		(void)gt_write8(GT_TOUCH, 0);
++		return EIO;
++	}
++	unsigned rest = n * GT_POINT_LEN + GT_TRAILER;
++	err = gt_read(GT_TOUCH + GT_TOUCH_HDR, f + GT_TOUCH_HDR, rest);
++	int ack = gt_write8(GT_TOUCH, 0);
++	if (err) {
++		return err;
++	}
++	if (gt_sum(f, GT_TOUCH_HDR + rest) != 0) {
++		return EIO;
++	}
++	uint32_t mask = 0;
++	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
++	for (unsigned i = 0; i < n; ++i) {
++		const uint8_t *p = f + GT_TOUCH_HDR + i * GT_POINT_LEN;
++		unsigned id = p[0] & 15u;
++		int px = (int)(p[1] | ((unsigned)p[2] << 8));
++		int py = (int)(p[3] | ((unsigned)p[4] << 8));
++		if ((p[0] & 0x80u) || id >= TOUCH_MAX || px >= RT_W || py >= RT_H) {
++			continue;       /* stylus or out-of-range record */
++		}
++		if (rt.flip & 1u) {
++			px = RT_W - 1 - px;
++		}
++		if (rt.flip & 2u) {
++			py = RT_H - 1 - py;
++		}
++		mask |= 1u << id;
++		x[id] = px;
++		y[id] = py;
++	}
++	if (rt.log) {
++		printf("RAPH TOUCH: frame n=%u mask=%#x p0=(%d,%d)\n", n, mask,
++		    (mask & 1u) ? x[0] : -1, (mask & 1u) ? y[0] : -1);
++	}
++	rt_report(mask, x, y);
++	return ack;
++}
++
++/* ---- board bring-up ---- */
++static bool
++rt_branch_running(uint32_t cbcr)
++{
++	return rt_wait_clear(rt.gcc, cbcr, 1u << 31);
++}
++
++static bool
++rt_clocks(void)
++{
++	rt_wr(rt.gcc, RT_GCC_VOTE, rt_rd(rt.gcc, RT_GCC_VOTE) | RT_VOTE_BITS);
++	uint32_t dfs = rt_rd(rt.gcc, RT_RCG + 0x14u);
++	printf("RAPH TOUCH: gcc vote=%#x rcg=%#x cfg=%#x dfs=%#x\n", rt_rd(rt.gcc, RT_GCC_VOTE),
++	    rt_rd(rt.gcc, RT_RCG), rt_rd(rt.gcc, RT_RCG + 4u), dfs);
++	rt.clk_level = 0;
++	if (dfs & 1u) {
++		/* Frequency tables belong to the boot firmware: pick its 19.2 MHz (XO, /1) level. */
++		unsigned level = 8;
++		for (unsigned l = 0; l < 8u; ++l) {
++			if ((rt_rd(rt.gcc, RT_RCG + 0x1cu + 4u * l) & 0x371fu) == 1u) {
++				level = l;
++				break;
++			}
++		}
++		if (level == 8u) {
++			printf("RAPH TOUCH: no XO/1 DFS level for QUP19\n");
++			return false;
++		}
++		rt.clk_level = level;
++	} else {
++		uint32_t cfg = (rt_rd(rt.gcc, RT_RCG + 4u) & ~(0x371fu | (1u << 20))) | 1u;
++		rt_wr(rt.gcc, RT_RCG + 4u, cfg);
++		rt_wr(rt.gcc, RT_RCG, rt_rd(rt.gcc, RT_RCG) | 1u);
++		if (!rt_wait_clear(rt.gcc, RT_RCG, 1u)) {
++			printf("RAPH TOUCH: RCG update timeout\n");
++			return false;
++		}
++	}
++	/* The S AHB branch may be hardware-gated (CBCR bit 1): then CLK_OFF is not ours to wait on. */
++	bool s_ahb_hw = (rt_rd(rt.gcc, RT_BR_S_AHB) & 2u) != 0;
++	if (!rt_branch_running(RT_BR_M_AHB) || (!s_ahb_hw && !rt_branch_running(RT_BR_S_AHB)) ||
++	    !rt_branch_running(RT_BR_SE)) {
++		printf("RAPH TOUCH: QUP19 clocks halted m=%#x s=%#x se=%#x\n", rt_rd(rt.gcc, RT_BR_M_AHB),
++		    rt_rd(rt.gcc, RT_BR_S_AHB), rt_rd(rt.gcc, RT_BR_SE));
++		return false;
++	}
++	return true;
++}
++
++static bool
++rt_se_init(void)
++{
++	uint32_t fw = rt_rd(rt.se, SE_FW);
++	uint32_t tx = rt_rd(rt.se, SE_HW_TX), rx = rt_rd(rt.se, SE_HW_RX);
++	printf("RAPH TOUCH: QUP19 fw=%#x proto=%u status=%#x if-disable=%#x\n",
++	    fw, (fw >> 8) & 0xffu, rt_rd(rt.se, SE_STATUS), rt_rd(rt.se, 0x64));
++	if (((fw >> 8) & 0xffu) != 3u || (rt_rd(rt.se, 0x64) & 1u) ||
++	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
++	    ((tx >> 16) & 0x3fu) < 2u || ((rx >> 16) & 0x3fu) < 2u) {
++		printf("RAPH TOUCH: QUP19 has no FIFO I2C firmware from the bootloader; stopping\n");
++		return false;
++	}
++	if (rt_rd(rt.se, SE_STATUS) & 0x1001u) {
++		printf("RAPH TOUCH: QUP19 busy; stopping\n");
++		return false;
++	}
++	rt_wr(rt.se, 0xe18, 0);
++	rt_wr(rt.se, 0xe1c, 0);
++	rt_wr(rt.se, 0x644, 0);
++	rt_wr(rt.se, SE_IRQ_CLR, 0xffffffffu);
++	rt_wr(rt.se, 0x648, 0xffffffffu);
++	rt_wr(rt.se, SE_DMA, 0);
++	rt_wr(rt.se, 0x28, rt_rd(rt.se, 0x28) | 0x7fu);
++	rt_wr(rt.se, 0xe30, rt_rd(rt.se, 0xe30) | 0x0fu);
++	rt_wr(rt.se, 0x24, 0x7f);
++	rt_wr(rt.se, 0x20, 1);
++	rt_wr(rt.se, SE_CLK_SEL, rt.clk_level);
++	rt_wr(rt.se, SE_MCLK, (7u << 4) | 1u);
++	rt_wr(rt.se, SE_SCL, (10u << 20) | (11u << 10) | 26u); /* 100 kHz from 19.2 MHz */
++	rt_wr(rt.se, 0x254, 0);
++	rt_wr(rt.se, 0x260, SE_PACK0);
++	rt_wr(rt.se, 0x264, SE_PACK1);
++	rt_wr(rt.se, 0x284, SE_PACK0);
++	rt_wr(rt.se, 0x288, SE_PACK1);
++	rt_wr(rt.se, SE_TX_WM, 0);
++	rt_wr(rt.se, 0x810, 0);
++	rt_wr(rt.se, 0x814, ((rx >> 16) & 0x3fu) - 1u);
++	rt_wr(rt.se, SE_IRQ_EN, SE_EVENTS);
++	if (rt_rd(rt.se, 0x260) != SE_PACK0 || rt_rd(rt.se, 0x284) != SE_PACK0 ||
++	    (rt_rd(rt.se, SE_TX_COUNT) & 0xfffffffu) || (rt_rd(rt.se, SE_RX_COUNT) & 0x1ffffffu)) {
++		printf("RAPH TOUCH: QUP19 setup readback mismatch; stopping\n");
++		return false;
++	}
++	return true;
++}
++
++/* Rails on with the IC held in reset, then a clean reset pulse. */
++static void
++rt_power_up(void)
++{
++	printf("RAPH TOUCH: pins before rst=%#x irq=%#x vdd=%#x avdd=%#x\n",
++	    rt_rd(rt.gpio, GPIO_IO(RT_PIN_RST)), rt_rd(rt.gpio, GPIO_IO(RT_PIN_IRQ)),
++	    rt_rd(rt.gpio, GPIO_IO(RT_PIN_VDD)), rt_rd(rt.gpio, GPIO_IO(RT_PIN_AVDD)));
++	rt_gpio(RT_PIN_IRQ, 0, 3, 7, false, false);       /* input, pull-up */
++	rt_gpio(RT_PIN_RST, 0, 3, 7, true, false);        /* hold in reset */
++	rt_gpio(RT_PIN_VDD, 0, 0, 0, true, true);
++	rt_gpio(RT_PIN_AVDD, 0, 0, 0, true, true);
++	rt_wait(300);                                     /* DT power-on delay */
++	rt_gpio(RT_PIN_SDA, RT_PIN_MUX, 0, 0, false, false);
++	rt_gpio(RT_PIN_SCL, RT_PIN_MUX, 0, 0, false, false);
++	rt_wait(2);
++	rt_gpio(RT_PIN_RST, 0, 3, 7, true, true);         /* release reset */
++	rt_wait(300);                                     /* firmware start-up */
++}
++
++static void
++rt_thread(void *arg, wait_result_t result)
++{
++	unsigned delay_s = 20;
++	(void)arg;
++	(void)result;
++	(void)PE_parse_boot_argn("raphtouchdelay", &delay_s, sizeof(delay_s));
++	printf("RAPH TOUCH: starting in %u s\n", delay_s);
++	rt_wait(delay_s * 1000u);
++	rt.gcc = ml_io_map(RT_GCC_PA, 0x60000);
++	rt.gpio = ml_io_map(RT_SOUTH_PA, RT_SOUTH_SIZE);
++	rt.se = ml_io_map(RT_SE_PA, 0x4000);
++	if (!rt.gcc || !rt.gpio || !rt.se) {
++		printf("RAPH TOUCH: MMIO mapping failed\n");
++		goto out;
++	}
++	/* Clocks first: QUP19's registers are not readable with its AHB clocks off. */
++	if (!rt_clocks() || !rt_se_init()) {
++		goto out;
++	}
++	rt_power_up();
++	rt.probing = true;
++	int awake = gt_stay_awake();
++	int ident = gt_identify();
++	rt.probing = false;
++	if (rt.dead || ident) {
++		printf("RAPH TOUCH: no GT9886 at %#x (awake=%d identify=%d); stopping\n", GT_ADDR, awake, ident);
++		goto out;
++	}
++	int flip = -1;
++	(void)PE_parse_boot_argn("raphtouchflip", &flip, sizeof(flip));
++	rt.flip = flip >= 0 ? ((unsigned)flip & 3u) : (rt.sensor == 0 ? 3u : 0u);
++	printf("RAPH TOUCH: GT9886 ready, sensor %u, flip %u, %dx%d, polling every 10 ms\n",
++	    rt.sensor, rt.flip, RT_W, RT_H);
++	unsigned errors = 0;
++	while (!rt.dead) {
++		int err = gt_poll();
++		if (err) {
++			if ((errors++ % 100u) == 0) {
++				printf("RAPH TOUCH: poll error %d irq=%#x\n", err, rt.irq_status);
++			}
++			if (errors == 10) {
++				rt_report(0, rt.x, rt.y);       /* lift fingers after repeated bad reads */
++			}
++		} else {
++			errors = 0;
++		}
++		rt_wait(10);
++	}
++	rt_report(0, rt.x, rt.y);
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++raphael_touch_init(void)
++{
++	int enabled = 1;
++	thread_t thread;
++	if (rt.started) {
++		return;
++	}
++	rt.started = true;
++	(void)PE_parse_boot_argn("raphtouch", &enabled, sizeof(enabled));
++	(void)PE_parse_boot_argn("raphtouchlog", &rt.log, sizeof(rt.log));
++	if (!enabled) {
++		printf("RAPH TOUCH: disabled (raphtouch=0)\n");
++		return;
++	}
++	if (kernel_thread_start(rt_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("RAPH TOUCH: kernel_thread_start failed\n");
++	}
++}
++#endif /* SWEET_BOARD_RAPHAEL */
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 184518b..1162306 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -58,6 +58,9 @@ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_fts_init(void);
+ extern void rmx1931_touch_init(void);
++#if SWEET_BOARD_RAPHAEL
++extern void raphael_touch_init(void);
++#endif
+ extern void rmx1931_battery_init(void);
+ extern void rmx1931_torch_init(void);
+ extern void rmx1931_haptic_init(void);
+@@ -686,6 +689,9 @@ sweet_ufs_init(void)
+ 	sweet_touch_init();
+ 	sweet_fts_init();
+ 	rmx1931_touch_init();
++#if SWEET_BOARD_RAPHAEL
++	raphael_touch_init();	/* Goodix GT9886: bsd/dev/raphael_touch.c */
++#endif
+ 	rmx1931_battery_init();
+ 	rmx1931_torch_init();
+ 	rmx1931_haptic_init();
+-- 
+2.43.0
+

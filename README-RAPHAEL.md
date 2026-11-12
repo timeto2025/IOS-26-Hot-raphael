@@ -5,9 +5,9 @@ Status: bring-up. Nothing here writes the phone's flash: every test is `fastboot
 | Step | What | Result |
 |---|---|---|
 | 1 | Zero-write shim probe (`shim/build-raphael.sh`) | **Works**: 8 cores, 6 GB RAM, SPMI/PMIC, UFS read, display 1080x2340 @ 0x9c000000 (cmd mode + TE, no DSC) |
-| 2 | XNU 0152 kernel boots with no root (`tools/raphael-kernel-test.sh`) | to test |
-| 3 | Goodix GT9886 touch (port of the iOS 18 raphael driver) | to do |
-| 4 | iOS 26 root on its own partition, writable | to do: decide which partition |
+| 2 | XNU 0152 kernel boots with no root (`tools/raphael-kernel-test.sh`) | **Works**: 8/8 CPUs, AMP E/P, AMFI/Sandbox/HFS up, stops at "Waiting on ... Apple_HFS" (no root given) |
+| 3 | Goodix GT9886 touch, patch 0153 (`raphtouchlog=1` prints frames) | to test |
+| 4 | iOS 26 root in the `darwin` partition (replaces HackiOS iOS 16.5), writable | to do |
 | 5 | Wi-Fi (WCN3990 + raphael board data), audio (TFA9874), cellular | to do |
 
 ## Hardware differences from RMX1931 handled so far
@@ -31,3 +31,10 @@ Status: bring-up. Nothing here writes the phone's flash: every test is `fastboot
 4. Reboot the phone into fastboot cleanly, then one command: `fastboot boot shim/out/raphael-kernel-test.img`.
 
 Expected: kernel console text on the panel, ending at a "waiting for root" style stop or a panic about the missing root. Photograph the last screens. A black screen, or an early reset back to fastboot, is also a result to report.
+
+## Touch test (patch 0153)
+
+`bsd/dev/raphael_touch.c` is this port's own GT9886 driver (helpers from IOS-26-Hot's MIT `sweet_touch.c`).
+About 20 s after boot (`raphtouchdelay=S`) it prints `RAPH TOUCH:` lines. Good result:
+`GT version block sum=0 pid=9886 sensor=N`, then `GT9886 ready`, then `frame n=1 ...` while a finger is down.
+If X or Y is mirrored, boot with `raphtouchflip=0..3` (bit 0 = X, bit 1 = Y). `raphtouch=0` turns it off.
