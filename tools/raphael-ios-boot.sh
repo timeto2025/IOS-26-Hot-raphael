@@ -45,6 +45,7 @@ if [[ "${USB:-1}" == 0 ]]; then CMDLINE+=" sweetusb=0"; else CMDLINE+=" sweetusb
 # 0x8bc00000+0x180000. WLANMPSS= / WLANMSA= override. Firmware: tools/raphael-stage-fw.sh.
 if [[ "${WIFI:-0}" == 1 || -n "${WLANMPSS:-}" ]]; then
 	CMDLINE+=" sweetwifid=1 wlanmpss=${WLANMPSS:-0x8e000000:0x9600000} wlanmsa=${WLANMSA:-0x8bc00000:0x180000}"
+	WLAND_START=1
 fi
 gpu_args=()
 if [[ -n "${GPUFW:-}" ]]; then
@@ -84,6 +85,14 @@ if [[ -z "${WALLPAPER:-}" ]]; then
 	python3 "$ROOT/tools/raphael-default-wallpaper.py" "$WALLPAPER"
 fi
 overlay_args+=(--wallpaper "$WALLPAPER" --wallpaper-size 1125x2499)
+if [[ "${WLAND_START:-0}" == 1 ]]; then
+	# wland must know the raphael carve-outs (wlanmpss/wlanmsa): userland newer than v0.8.1
+	strings "$WORK/userland/bin/wland" 2>/dev/null | grep -q wlanmpss= || {
+		echo "error: this userland's wland ignores wlanmpss=/wlanmsa= (RMX1931 addresses); use the fork's ios-userland build" >&2
+		exit 1
+	}
+	overlay_args+=(--wland-autostart)
+fi
 python3 "$ROOT/tools/make-ios26-overlay.py" "${overlay_args[@]}"
 
 # RECOVERY=1: no overlay in the payload, small enough for the 64 MiB recovery partition. The kernel

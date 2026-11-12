@@ -492,6 +492,8 @@ def main():
     ap.add_argument('--selftest-script', help='optional bring-up self-test shell script for guarded test boots')
     ap.add_argument('--register-missing-hot-daemons', action='store_true',
                     help='fresh root (raphael): register absent dropbear/wland jobs; wland stays idle')
+    ap.add_argument('--wland-autostart', action='store_true',
+                    help='raphael: start wland at boot (`wland auto`), once its firmware and carve-outs are set')
     ap.add_argument('--ssh-key', help='public key file installed as root\'s /var/root/.ssh/authorized_keys (dropbear)')
     ap.add_argument('--extra', action='append', default=[],
                     help='extra file SRC:DST[:OCTAL_MODE] to include in the overlay (repeatable)')
@@ -648,6 +650,14 @@ def main():
                 'RunAtLoad': False, 'KeepAlive': False, 'UserName': 'root',
                 'StandardErrorPath': '/var/local/wland.log', 'StandardOutPath': '/var/local/wland.log',
             }
+
+    if args.wland_autostart:
+        wl = jobs.get('/System/Library/LaunchDaemons/org.iosonpixel.wland.plist')
+        if isinstance(wl, dict):
+            wl['RunAtLoad'] = True
+            wl['KeepAlive'] = False
+            wl.pop('Program', None)
+            wl['ProgramArguments'] = ['/var/local/bin/wland', 'auto']
 
     # Dropbear v2024.86 is built without syslog (-E is invalid; stderr is default).
     db_key = '/System/Library/LaunchDaemons/org.iosonpixel.dropbear.plist'
