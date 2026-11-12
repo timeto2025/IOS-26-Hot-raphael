@@ -110,6 +110,20 @@ if [[ "${WLAND_START:-0}" == 1 ]]; then
 	}
 	overlay_args+=(--wland-autostart)
 fi
+# RMTFS_RESTORE=1 (default): the modem's EFS copies in darwin (/var/local/fw/rmtfs, which the modem
+# writes back through rmtfs) are put back to the phone's own partitions (work/fw/rmtfs from
+# raphael-extract-fw.sh) with every new image: hard resets in the middle of an EFS write left them
+# half-written. RMTFS_RESTORE=0 keeps what the modem wrote.
+if [[ "${RMTFS_RESTORE:-1}" == 1 ]]; then
+	n=0
+	for img in modemst1 modemst2 fsg fsc; do
+		if [[ -f "$ROOT/work/fw/rmtfs/$img.img" ]]; then
+			overlay_args+=(--extra "$ROOT/work/fw/rmtfs/$img.img:private/var/local/fw/rmtfs/$img.img:0600")
+			n=$((n + 1))
+		fi
+	done
+	echo "rmtfs: $n EFS image(s) restored from work/fw/rmtfs"
+fi
 # Daemons that only crash-loop on raphael (no Bluetooth driver yet, no SEP): STRIP_JOBS="" keeps them all.
 STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}
 for j in $STRIP_JOBS; do overlay_args+=(--strip-job "$j"); done
