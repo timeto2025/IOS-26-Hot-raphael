@@ -5,6 +5,25 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael (Redmi K20 Pro), 2026-11-13 02:20 MSK: kernel 0164, darwin re-synced
+- **Kernel 0164** (patches 0152-0164): GT9886 touch, AMOLED DCS brightness, PM8150B battery % / voltage /
+  current / charging (0159, 0161, 0162: cable state polled every 1 s), PM8150L torch, PM8150B ERM haptics (0160),
+  USB endpoint commands with the USB2 PHY awake (0163), page flip at TE over three frames in cont_splash (0164,
+  `raphflip=0` off). Extra GPU pool range 0xa8800000.. (0157/0158) is off by default (`raphgpool=<MB>`): 0157
+  ran into the memory hole at 0xbcc00000 (ABL memory node `<0x80000000 0x3cc00000>, <0xc0000000 0x140000000>`)
+  and boot-looped; the extra memory did not help the UI.
+- **Observed**: after the 0157 boot loop (hard resets), Wi-Fi joins timed out at auth (state 2) and the keyboard
+  lagged on every kernel (0154, 0155, 0156, 0164 tried). Re-syncing darwin from the clean root image
+  (`tools/raphael-write-darwin.py ~/ios26-root-raphael.img` from TWRP) fixed the keyboard. Guess, not verified:
+  the modem's EFS copies (rmtfs writes modemst1 back into darwin) and rebuilt caches/indexes.
+- **Image tools**: `STRIP_JOBS` (default bluetoothd, fairplayd.H2, seputil jobs), `MTL2_CLIENTS`,
+  `RMTFS_RESTORE` (off: +24 MB makes the image too big for ABL -> fastboot), `EXTRA_ARGS`.
+- **Hardware map** from this phone's dtbo (`tools/raphael-hw-facts.py`) and strings of the voxelsy HackiOS build:
+  TFA9874 (I2C 0x34, GPIO 114/115, reset 59, irq 141), WCN3990 BT on QUP2 SE3 UART 0xc8c000 (GPIO 43-46,
+  crbtfw*.tlv / crnv*.bin), cameras IMX586 rear / S5K3T2 front (pop-up motor PWM), WCD9340 codec.
+- **Open**: confirm Wi-Fi joins again after the re-sync; Bluetooth driver; sound (ADSP + TFA9874); white widgets;
+  Spotlight load; cellular.
+
 ### `IOS-26-Hot` 6-FIX SPEED, STABILITY & KEYCHAIN PACKAGE VERIFIED ON RMX1931 (`hot0151d`, kernel `0151`, 2026-10-29)
 - **Kernel**: Untouched GitHub Actions CI artifact from `xnu.yml` run `40771498371` (`37dd646`, kernel `0151`), saved at `work/boot/kernel-26-0151` (`xnu-12377.121.6`).
 - **Userland & `HotMetal2`**: Untouched GitHub Actions CI artifact from `userland.yml` run `40799671114` (`a8c7bfc`), staged via `tools/make-ios26-overlay.py` (`--hotmetal2`, `--wallpaper-size 1125x2499`, `--timezone Asia/Kolkata`, `--enable-cellular`, `--enable-adsp`, `--wland-wrapper /private/var/local/bin/hot-bootprep`, `--mtl2-clients "*\n-chronod\n-cameracaptured\n-WidgetRenderer_Default\n-PosterBoard"`).
