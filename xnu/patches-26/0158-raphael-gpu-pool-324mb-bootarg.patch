@@ -1,18 +1,18 @@
-From f59c8f8e08d02c99480282dda0b4b58a446bf443 Mon Sep 17 00:00:00 2001
+From 7f7780b8d143d1a0fd8559b657742d173afa7bba Mon Sep 17 00:00:00 2001
 From: raphael port <noreply@example.invalid>
 Date: Thu, 12 Nov 2026 21:42:43 +0300
-Subject: [PATCH] raphael: GPU pool extra range 256 MB by default,
- raphgpool=<MB>
+Subject: [PATCH] raphael: GPU pool extra range ends at the memory hole (324
+ MB), raphgpool=<MB>
 
 ---
- bsd/dev/sweet_gpu.c | 39 +++++++++++++++++++++++++++++++++------
- 1 file changed, 33 insertions(+), 6 deletions(-)
+ bsd/dev/sweet_gpu.c | 38 ++++++++++++++++++++++++++++++++------
+ 1 file changed, 32 insertions(+), 6 deletions(-)
 
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index e0f9df3..9a95433 100644
+index e0f9df3..27ba697 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
-@@ -1031,19 +1031,40 @@ sweet_gpu_submit_user(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms, ui
+@@ -1031,19 +1031,39 @@ sweet_gpu_submit_user(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms, ui
   */
  #define GPOOL_UNIT      0x4000ULL
  #define GPOOL_FREE_MAX  4096
@@ -24,14 +24,13 @@ index e0f9df3..9a95433 100644
 -	 * ramdisk) and the ABL ramdisk at 0xc0000000, with 8 MB to spare at the top. Nothing there in its
 -	 * device trees' reserved-memory; the shim and payload sit below 0x85700000. 944 -> 1312 MB: v0.8.1's
 -	 * backboardd + SpringBoard alone peak at ~815 MB on this phone.
-+	 * raphael: HLOS RAM above cdsp_sec_regions (ends 0xa8800000). The first try took all of it up to
-+	 * 0xbf800000 and the phone reset itself with no panic once the pool's use passed ~270 MB: something
-+	 * above that (a hole in the memory node or a carve-out ABL keeps out of the device tree) is not RAM
-+	 * to us. Default 256 MB (to 0xb8800000, all touched before the reset); raphgpool=<MB> picks the
-+	 * size (0 = off, at most 368).
++	 * raphael: HLOS RAM from the end of cdsp_sec_regions (0xa8800000) to the end of the first memory
++	 * bank: ABL's memory node is <0x80000000 0x3cc00000>, <0xc0000000 0x140000000>, so 0xbcc00000 to
++	 * 0xc0000000 is no RAM at all (0157 ran into it: reset with no panic). 324 MB; raphgpool=<MB>
++	 * picks less (0 = off).
  	 */
 -	{ 0xa8800000ULL, 0x17000000ULL },       /* 368 MB */
-+	{ 0xa8800000ULL, 0x10000000ULL },
++	{ 0xa8800000ULL, 0x14400000ULL },       /* 324 MB, to 0xbcc00000 */
  #endif
  	{ 0xc4000000ULL, 0x1c000000ULL },       /* 448 MB (the first 64 MB left to ABL's ramdisk) */
  	{ 0xe1000000ULL, 0x1f000000ULL },       /* 496 MB */
@@ -47,10 +46,10 @@ index e0f9df3..9a95433 100644
 +		return;
 +	}
 +	done = true;
-+	uint32_t mb = 256;
++	uint32_t mb = 324;
 +	if (PE_parse_boot_argn("raphgpool", &mb, sizeof(mb))) {
-+		if (mb > 368) {
-+			mb = 368;
++		if (mb > 324) {
++			mb = 324;
 +		}
 +		gpool_ranges[0].size = (uint64_t)mb << 20;
 +	}
@@ -59,7 +58,7 @@ index e0f9df3..9a95433 100644
  static struct { uint64_t pa, size; } gpool_free[GPOOL_FREE_MAX];       /* sorted by address, merged */
  static uint32_t gpool_nfree;
  static uint64_t gpool_used, gpool_peak, gpool_failures;
-@@ -1054,6 +1075,7 @@ uint64_t
+@@ -1054,6 +1074,7 @@ uint64_t
  sweet_gpu_pool_avail(void)
  {
  	uint64_t total = 0;
@@ -67,7 +66,7 @@ index e0f9df3..9a95433 100644
  	for (unsigned i = 0; i < sizeof(gpool_ranges) / sizeof(gpool_ranges[0]); i++) {
  		total += gpool_ranges[i].size;
  	}
-@@ -1071,7 +1093,11 @@ sweet_gpu_pool_try_alloc(uint64_t bytes, uint64_t *pa)
+@@ -1071,7 +1092,11 @@ sweet_gpu_pool_try_alloc(uint64_t bytes, uint64_t *pa)
  	int rc = -1;
  	lck_mtx_lock(&sweet_gpool_lock);
  	if (!gpool_ready) {
@@ -79,7 +78,7 @@ index e0f9df3..9a95433 100644
  			gpool_free[gpool_nfree].pa = gpool_ranges[i].pa;
  			gpool_free[gpool_nfree].size = gpool_ranges[i].size;
  			gpool_nfree++;
-@@ -1417,6 +1443,7 @@ sweet_gpu_diag_snapshot(struct sweet_diag_gpu *out)
+@@ -1417,6 +1442,7 @@ sweet_gpu_diag_snapshot(struct sweet_diag_gpu *out)
  		return;
  	}
  	uint64_t total_pool = 0;
