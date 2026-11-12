@@ -92,7 +92,7 @@ fi
 overlay_args+=(--wallpaper "$WALLPAPER" --wallpaper-size 1125x2499)
 if [[ "${WLAND_START:-0}" == 1 ]]; then
 	# wland must know the raphael carve-outs (wlanmpss/wlanmsa): userland newer than v0.8.1
-	strings "$WORK/userland/bin/wland" 2>/dev/null | grep -q wlanmpss= || {
+	grep -aq "wlanmpss=" "$WORK/userland/bin/wland" || {
 		echo "error: this userland's wland ignores wlanmpss=/wlanmsa= (RMX1931 addresses); use the fork's ios-userland build" >&2
 		exit 1
 	}
