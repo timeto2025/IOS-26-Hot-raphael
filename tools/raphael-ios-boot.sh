@@ -110,6 +110,12 @@ if [[ "${WLAND_START:-0}" == 1 ]]; then
 	}
 	overlay_args+=(--wland-autostart)
 fi
+# MTL2_CLIENTS='* -chronod ...' (spaces or newlines): which processes get HotMetal2 (/var/local/mtl2-clients);
+# default as upstream: everyone but chronod, cameracaptured, WidgetRenderer_Default and PosterBoard.
+if [[ -n "${MTL2_CLIENTS:-}" ]]; then
+	overlay_args+=(--mtl2-clients "$(tr ' ' '\n' <<<"$MTL2_CLIENTS")")
+	echo "HotMetal2 clients: $(tr '\n' ' ' <<<"$MTL2_CLIENTS")"
+fi
 python3 "$ROOT/tools/make-ios26-overlay.py" "${overlay_args[@]}"
 
 # RECOVERY=1: no overlay in the payload, small enough for the 64 MiB recovery partition. The kernel
