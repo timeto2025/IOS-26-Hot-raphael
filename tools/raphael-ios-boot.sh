@@ -71,6 +71,13 @@ fi
 if [[ ! -f "$WORK/userland/bin/dropbearmulti" ]]; then
 	echo "SSH: warning: the userland has no bin/dropbearmulti; dropbear will not run"
 fi
+# Static Lock/Home wallpaper staged in the root (PosterBoard is off the GPU path): WALLPAPER=FILE.png,
+# else a generated gradient.
+if [[ -z "${WALLPAPER:-}" ]]; then
+	WALLPAPER=$WORK/wallpaper-default.png
+	python3 "$ROOT/tools/raphael-default-wallpaper.py" "$WALLPAPER"
+fi
+overlay_args+=(--wallpaper "$WALLPAPER" --wallpaper-size 1125x2499)
 python3 "$ROOT/tools/make-ios26-overlay.py" "${overlay_args[@]}"
 
 python3 "$ROOT/tools/mkpayload.py" "$KERNEL" "$WORK/raphael.adt" "$WORK/payload-raphael-ios.bin" \
