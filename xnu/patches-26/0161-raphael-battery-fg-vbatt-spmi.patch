@@ -1,0 +1,150 @@
+From 19a606c91c47bcc9a3e0c21d4ef489195dd0f0dd Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Thu, 12 Nov 2026 22:59:59 +0300
+Subject: [PATCH] raphael: battery voltage/current from FG BATT_INFO, SPMI read
+ access to the FG status registers
+
+---
+ bsd/dev/rmx1931_battery.c | 75 +++++++++++++++++++++++++++++++++------
+ bsd/dev/sweet_spmi.c      |  4 ++-
+ 2 files changed, 67 insertions(+), 12 deletions(-)
+
+diff --git a/bsd/dev/rmx1931_battery.c b/bsd/dev/rmx1931_battery.c
+index fc66a1e..3164edb 100644
+--- a/bsd/dev/rmx1931_battery.c
++++ b/bsd/dev/rmx1931_battery.c
+@@ -456,27 +456,77 @@ out:
+  * qcom,fg-gen4, with the charger (qcom,qpnp-smb5) and an SMB1390 charge pump. Read-only:
+  *   0x4009  FG BATT_SOC monotonic SOC, 0..255 (what Android's fg-gen4 reports as capacity)
+  *   0x1310  USBIN interrupt real-time status, 0x1006 charger status (as on RMX1931)
+- * Voltage, current and temperature live in the FG's SRAM (memif), not read here yet.
++ *   0x41a0/0x41a2 BATT_INFO VBATT / IBATT (registers and scales from the downstream fg-gen4 headers,
++ *   as UniXNU-raphael 0262 by jackyhowh documents them for this phone). Temperature is not read yet.
+  */
+ #define FG_SID                  2u
+ #define FG_BATT_SOC_BASE        0x4000u
+ #define FG_MONOTONIC_SOC        (FG_BATT_SOC_BASE + 0x09u)
++#define FG_BATT_INFO_BASE       0x4100u
++static uint16_t fg_raw_mv, fg_raw_ma;
++
++static bool
++fg_read2(unsigned addr, uint16_t *out)
++{
++	uint8_t lo = 0, hi = 0, lo2 = 1;
++	/* the FG latches the word on its low byte: read it twice and keep a pair that agrees */
++	for (unsigned i = 0; i < 4; ++i) {
++		if (sweet_spmi_read(FG_SID, addr, &lo) != 0 || sweet_spmi_read(FG_SID, addr + 1u, &hi) != 0 ||
++		    sweet_spmi_read(FG_SID, addr, &lo2) != 0) {
++			return false;
++		}
++		if (lo == lo2) {
++			*out = (uint16_t)(lo | ((unsigned)hi << 8));
++			return true;
++		}
++	}
++	return false;
++}
+ 
+ static bool
+ fg_poll_once(struct rmx1931_battery_state *st, uint8_t *raw_out)
+ {
+-	uint8_t raw = 0, usb_rt = 0, chg_stat = 0;
+-	if (sweet_spmi_read(FG_SID, FG_MONOTONIC_SOC, &raw) != 0) {
++	uint8_t raw = 0, raw2 = 1, usb_rt = 0, chg_stat = 0;
++	for (unsigned i = 0; i < 5 && raw != raw2; ++i) {
++		if (sweet_spmi_read(FG_SID, FG_MONOTONIC_SOC, &raw) != 0 ||
++		    sweet_spmi_read(FG_SID, FG_MONOTONIC_SOC, &raw2) != 0) {
++			return false;
++		}
++	}
++	if (raw != raw2) {
+ 		return false;
+ 	}
+ 	*raw_out = raw;
+-	unsigned soc = ((unsigned)raw * 100u + 127u) / 255u;
++	/* 0..255 to 0..100 with 1..254 kept inside 1..99, as Android's capacity reads */
++	unsigned soc = raw == 255u ? 100u : raw == 0u ? 0u : ((unsigned)(raw - 1u) * 98u + 126u) / 253u + 1u;
++
++	/* BATT_INFO VBATT 0x41a0 and IBATT 0x41a2 (16-bit). Two VBATT scales are in use on these FGs
++	 * (122.07 and 194.637 uV per bit): take the one that gives a cell voltage. IBATT 488.281 uA per bit,
++	 * positive while discharging. */
++	uint16_t rv = 0, ri = 0;
++	unsigned mv = 0;
++	int ma = 0;
++	if (fg_read2(FG_BATT_INFO_BASE + 0xa0u, &rv)) {
++		unsigned a = (unsigned)(((uint64_t)rv * 122070u) / 1000000u);
++		unsigned b = (unsigned)(((uint64_t)rv * 194637u) / 1000000u);
++		mv = (a >= 2800u && a <= 4600u) ? a : (b >= 2800u && b <= 4600u) ? b : 0u;
++	}
++	if (fg_read2(FG_BATT_INFO_BASE + 0xa2u, &ri)) {
++		int s = (ri & 0x8000u) ? (int)ri - 65536 : (int)ri;
++		ma = (int)(-((int64_t)s * 488281) / 1000000);
++		if (ma < -8000 || ma > 8000) {
++			ma = 0;
++		}
++	}
++	fg_raw_mv = rv;
++	fg_raw_ma = ri;
++
+ 	bool spmi_usb = sweet_spmi_read(2, 0x1310u, &usb_rt) == 0;
+ 	bool spmi_chg = sweet_spmi_read(2, 0x1006u, &chg_stat) == 0;
+ 	unsigned chg_state = spmi_chg ? (chg_stat & 7u) : 0u;
+-	bool external = spmi_usb && ((usb_rt & 0x10u) != 0 || (usb_rt & 0x04u) != 0);
++	bool external = spmi_usb && (usb_rt & 0x10u) != 0;
+ 	bool charging = external && spmi_chg && chg_state >= 1u && chg_state <= 4u;
+-	bool full = external && !charging && ((spmi_chg && chg_state == 5u) || soc >= 100u);
++	bool full = external && spmi_chg && chg_state == 5u;
+ 	if (full) {
+ 		soc = 100u;
+ 	}
+@@ -488,9 +538,9 @@ fg_poll_once(struct rmx1931_battery_state *st, uint8_t *raw_out)
+ 	st->charging = charging;
+ 	st->full = full;
+ 	st->soc = soc;
+-	st->voltage_mv = 3850u;         /* nominal: not measured yet (FG SRAM) */
+-	st->pack_voltage_mv = 3850u;
+-	st->current_ma = 0;
++	st->voltage_mv = mv ? mv : 3850u;
++	st->pack_voltage_mv = st->voltage_mv;
++	st->current_ma = ma;
+ 	st->design_mah = 4000u;         /* raphael: 4000 mAh */
+ 	st->fcc_mah = 4000u;
+ 	st->rem_mah = (4000u * soc + 50u) / 100u;
+@@ -511,13 +561,16 @@ fg_thread(void *arg __unused, wait_result_t wr __unused)
+ 			errors = 0;
+ 			bq_last_state = st;
+ 			sys_bat_soc = (int)st.soc;
++			sys_bat_mv = (int)st.voltage_mv;
++			sys_bat_ma = st.current_ma;
+ 			sys_bat_charging = st.charging ? 1 : 0;
+ 			sys_bat_external = st.external_connected ? 1 : 0;
+ 			sys_bat_fcc_mah = (int)st.fcc_mah;
+ 			SweetBatteryReport(&st);
+ 			if (logged < 4 || (logged % 20u) == 0) {
+-				printf("RAPH BATTERY: soc=%u%% (fg raw %u/255) ext=%d chg=%d full=%d\n",
+-				    st.soc, raw, st.external_connected, st.charging, st.full);
++				printf("RAPH BATTERY: soc=%u%% (fg %u/255) %umV %dmA (raw %#x %#x) ext=%d chg=%d full=%d\n",
++				    st.soc, raw, st.voltage_mv, st.current_ma, fg_raw_mv, fg_raw_ma,
++				    st.external_connected, st.charging, st.full);
+ 			}
+ 			logged++;
+ 		} else {
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 1dc8831..2a936db 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -83,8 +83,10 @@ sp_allowed(unsigned sid, unsigned peripheral)
+ 		       peripheral == 0x13 || peripheral == 0x24 || peripheral == 0x48 ||
+ 		       peripheral == 0x60;
+ 	case 2:
++		/* 0x40/0x41: PM8150B FG gen4 BATT_SOC / BATT_INFO status registers (raphael's fuel gauge, read only) */
+ 		return peripheral == 0x10 || peripheral == 0x11 || peripheral == 0x12 ||
+-		       peripheral == 0x13 || peripheral == 0x16 || peripheral == 0x24;
++		       peripheral == 0x13 || peripheral == 0x16 || peripheral == 0x24 ||
++		       peripheral == 0x40 || peripheral == 0x41;
+ 	case 4:
+ 		return peripheral == 0x24;
+ 	case 5:
+-- 
+2.43.0
+
