@@ -18,7 +18,7 @@ sudo mount -t hfsplus -o loop,force,rw "$IMG" "$MNT"
 sudo install -d -m 0755 -o 0 -g 0 "$MNT/private/var/local/fw/modem" "$MNT/private/var/local/fw/rmtfs"
 sudo rsync -a --delete --chown=0:0 --chmod=D755,F644 "$ROOT/work/fw/modem/" "$MNT/private/var/local/fw/modem/"
 sudo rsync -a --delete --chown=0:0 --chmod=D700,F600 "$ROOT/work/fw/rmtfs/" "$MNT/private/var/local/fw/rmtfs/"
-du -sh "$MNT/private/var/local/fw/modem" "$MNT/private/var/local/fw/rmtfs"
+sudo du -sh "$MNT/private/var/local/fw/modem" "$MNT/private/var/local/fw/rmtfs"
 sync
 sudo umount "$MNT"
 fsck.hfsplus -fy "$IMG" | tail -1
