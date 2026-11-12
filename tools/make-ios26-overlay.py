@@ -492,6 +492,7 @@ def main():
     ap.add_argument('--selftest-script', help='optional bring-up self-test shell script for guarded test boots')
     ap.add_argument('--register-missing-hot-daemons', action='store_true',
                     help='fresh root (raphael): register absent dropbear/wland jobs; wland stays idle')
+    ap.add_argument('--ssh-key', help='public key file installed as root\'s /var/root/.ssh/authorized_keys (dropbear)')
     ap.add_argument('--extra', action='append', default=[],
                     help='extra file SRC:DST[:OCTAL_MODE] to include in the overlay (repeatable)')
     args = ap.parse_args()
@@ -1211,6 +1212,13 @@ def main():
         if rm_paths:
             add_ustar_bytes(tf, '.sweet-rm', ('\n'.join(rm_paths) + '\n').encode('ascii'), mode=0o644)
 
+        if args.ssh_key:
+            with open(args.ssh_key, 'rb') as f:
+                key = f.read()
+            if not key.startswith((b'ssh-', b'ecdsa-')):
+                raise ValueError(f'{args.ssh_key} is not an OpenSSH public key')
+            add_ustar_dir(tf, 'private/var/root/.ssh', mode=0o700)
+            add_ustar_bytes(tf, 'private/var/root/.ssh/authorized_keys', key, mode=0o600)
         for spec in args.extra:
             parts = spec.split(':')
             if len(parts) not in (2, 3):
