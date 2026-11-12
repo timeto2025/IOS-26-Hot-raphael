@@ -116,6 +116,11 @@ echo "Boot args: $CMDLINE"
 # AVBTOOL=path/to/avbtool.py: also write OUT-avb.img with an unsigned AVB hash footer for the
 # 128 MiB recovery partition (tools/raphael-move-recovery.py); flash that one to recovery.
 # Use images/twrp-original.img as STOCK_BOOT_IMG for recovery: its recovery_dtbo is kept.
+if [[ -z "${AVBTOOL:-}" ]]; then
+	for c in "$ROOT/downloads/avb/avbtool.py" "$HOME"/Downloads/HackiOS-*/tools/scripts/avbtool.py; do
+		[[ -f "$c" ]] && { AVBTOOL=$c; break; }
+	done
+fi
 if [[ -n "${AVBTOOL:-}" ]]; then
 	AVB_OUT=${OUT%.img}-avb.img
 	cp "$OUT" "$AVB_OUT"
