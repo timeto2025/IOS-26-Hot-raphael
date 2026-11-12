@@ -879,6 +879,23 @@ int main(int argc, char **argv)
 	(void)setpriority(PRIO_PROCESS, 0, -10);
 	(void)setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_IMPORTANT);
 	setvbuf(stdout, NULL, _IONBF, 0);	/* a stalled bus access must not swallow the output */
+	{
+		/* boot-arg wlandklog=1: send stdout/stderr to the kernel console instead of
+		 * /var/local/wland.log, so the log survives in the kernel log ring (readable from
+		 * TWRP) when USB/SSH is not up. */
+		char args[1024] = "";
+		size_t n = sizeof(args) - 1;
+		if (sysctlbyname("kern.bootargs", args, &n, NULL, 0) == 0 && strstr(args, "wlandklog=1")) {
+			int cfd = open("/dev/console", O_WRONLY | O_NOCTTY);
+			if (cfd >= 0) {
+				dup2(cfd, 1);
+				dup2(cfd, 2);
+				if (cfd > 2)
+					close(cfd);
+				setvbuf(stderr, NULL, _IOLBF, 0);
+			}
+		}
+	}
 	pm_init();
 	if (smem_init())
 		return 1;

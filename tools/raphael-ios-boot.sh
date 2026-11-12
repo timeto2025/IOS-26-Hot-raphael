@@ -50,6 +50,7 @@ if [[ "${USB:-1}" == 0 ]]; then CMDLINE+=" sweetusb=0"; else CMDLINE+=" sweetusb
 # 0x8bc00000+0x180000. WLANMPSS= / WLANMSA= override. Firmware: tools/raphael-stage-fw.sh.
 if [[ "${WIFI:-0}" == 1 || -n "${WLANMPSS:-}" ]]; then
 	CMDLINE+=" sweetwifid=1 wlanmpss=${WLANMPSS:-0x8e000000:0x9600000} wlanmsa=${WLANMSA:-0x8bc00000:0x180000}"
+	[[ "${WIFI_KLOG:-1}" == 1 ]] && CMDLINE+=" wlandklog=1"   # wland log into the kernel log ring (bring-up)
 	WLAND_START=1
 fi
 gpu_args=()
