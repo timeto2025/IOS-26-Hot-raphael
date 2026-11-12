@@ -91,6 +91,13 @@ if [[ -z "${WALLPAPER:-}" ]]; then
 	python3 "$ROOT/tools/raphael-default-wallpaper.py" "$WALLPAPER"
 fi
 overlay_args+=(--wallpaper "$WALLPAPER" --wallpaper-size 1125x2499)
+# WLAN_CONF=FILE ("ssid=NAME" / "psk=PASSPHRASE" lines): wland joins that network by itself at boot.
+# It ends up in the boot image and in darwin (/var/local/wlan.conf, 0600); never in git.
+if [[ -n "${WLAN_CONF:-}" ]]; then
+	grep -q '^ssid=' "$WLAN_CONF" || { echo "error: $WLAN_CONF has no ssid= line" >&2; exit 1; }
+	overlay_args+=(--extra "$WLAN_CONF:private/var/local/wlan.conf:0600")
+	echo "Wi-Fi: wlan.conf staged for '$(sed -n 's/^ssid=//p' "$WLAN_CONF" | head -1)'"
+fi
 if [[ "${WLAND_START:-0}" == 1 ]]; then
 	# wland must know the raphael carve-outs (wlanmpss/wlanmsa): userland newer than v0.8.1
 	grep -aq "wlanmpss=" "$WORK/userland/bin/wland" || {
