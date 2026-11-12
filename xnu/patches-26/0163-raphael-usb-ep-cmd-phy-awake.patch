@@ -1,0 +1,144 @@
+From 13529e30940d455fc886625afc5c5c1176d06fdb Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 00:12:12 +0300
+Subject: [PATCH] raphael: USB endpoint commands with the USB2 PHY awake
+ (SUSPHY/ENBLSLPM), retry after PHY init; extra GPU pool off by default
+
+---
+ bsd/dev/sweet_gpu.c | 11 ++++---
+ bsd/dev/sweet_usb.c | 71 ++++++++++++++++++++++++++++++++++++---------
+ 2 files changed, 62 insertions(+), 20 deletions(-)
+
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 27ba697..f2e8ced 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1055,13 +1055,12 @@ gpool_ranges_setup(void)
+ 		return;
+ 	}
+ 	done = true;
+-	uint32_t mb = 324;
+-	if (PE_parse_boot_argn("raphgpool", &mb, sizeof(mb))) {
+-		if (mb > 324) {
+-			mb = 324;
+-		}
+-		gpool_ranges[0].size = (uint64_t)mb << 20;
++	uint32_t mb = 0;        /* off by default: it did not help the UI (GPU time is the limit, not memory) */
++	(void)PE_parse_boot_argn("raphgpool", &mb, sizeof(mb));
++	if (mb > 324) {
++		mb = 324;
+ 	}
++	gpool_ranges[0].size = (uint64_t)mb << 20;
+ #endif
+ }
+ static struct { uint64_t pa, size; } gpool_free[GPOOL_FREE_MAX];       /* sorted by address, merged */
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index a74c6e3..4aca289 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -283,24 +283,44 @@ ud_sleep_ms(unsigned ms)
+ static int
+ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+ {
++	/*
++	 * DWC3 databook 2.60a 6.3.2.5: at high/full speed an endpoint command only completes while the USB2
++	 * PHY clock runs, so GUSB2PHYCFG.SUSPHY (bit 6) and ENBLSLPM (bit 8) are cleared around it and put
++	 * back after (what every DWC3 driver does). ABL leaves ENBLSLPM set on raphael (GUSB2PHYCFG
++	 * 0x00102500): with the PHY asleep the first SETEPCONFIG timed out ("ep0 cmd 0x1 timeout").
++	 */
++	uint32_t phycfg = dwc_rd(0xc200);
++	uint32_t awake = phycfg & ~((1u << 6) | (1u << 8));
++	if (awake != phycfg) {
++		dwc_wr(0xc200, awake);
++	}
+ 	dwc_wr(DEPCMDPAR0(ep), p0);
+ 	dwc_wr(DEPCMDPAR1(ep), p1);
+ 	dwc_wr(DEPCMDPAR2(ep), p2);
+ 	dwc_wr(DEPCMD(ep), cmd | DEPCMD_CMDACT);
+-	for (int i = 0; i < 1000; i++) {
++	int rc = -1;
++	int i;
++	for (i = 0; i < 5000; i++) {
+ 		uint32_t v = dwc_rd(DEPCMD(ep));
+ 		if (!(v & DEPCMD_CMDACT)) {
+ 			uint32_t status = (v >> 12) & 0xf;
+ 			if (status) {
+ 				printf("SWEET USB: ep%u cmd 0x%x status %u\n", ep, cmd & 0xf, status);
+-				return -1;
++			} else {
++				rc = 0;
+ 			}
+-			return 0;
++			break;
+ 		}
+ 		delay(1);
+ 	}
+-	printf("SWEET USB: ep%u cmd 0x%x timeout\n", ep, cmd & 0xf);
+-	return -1;
++	if (i == 5000) {
++		printf("SWEET USB: ep%u cmd 0x%x timeout (GUSB2PHYCFG %#x, DSTS %#x)\n", ep, cmd & 0xf,
++		    phycfg, dwc_rd(DSTS));
++	}
++	if (awake != phycfg) {
++		dwc_wr(0xc200, phycfg);
++	}
++	return rc;
+ }
+ 
+ /* One TRB (at DMA offset trb) on physical endpoint ep. */
+@@ -1404,20 +1424,43 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	dwc_wr(DEVTEN, 0x7);
+ 
+ 	printf("SWEET USB: step ep0 commands\n");
+-	/* Endpoint 0 OUT/IN: start config, control type, max packet 512 until connect done. */
+-	if (ud_epcmd(0, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
+-	    ud_epcmd(0, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (0u << 25), 0) ||
+-	    ud_epcmd(0, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
+-	    ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (1u << 25), 0) ||
+-	    ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
+-		printf("SWEET USB: endpoint 0 setup failed\n");
+-		return;
++	/* Endpoint 0 OUT/IN: start config, control type, max packet 512 until connect done. If that fails
++	 * (the PHY as ABL left it), the HS PHY is set up first and the commands tried once more. */
++	bool phy_done = false;
++	for (int attempt = 0;; attempt++) {
++		if (!(ud_epcmd(0, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
++		    ud_epcmd(0, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (0u << 25), 0) ||
++		    ud_epcmd(0, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
++		    ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (1u << 25), 0) ||
++		    ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0))) {
++			break;
++		}
++		if (attempt > 0) {
++			printf("SWEET USB: endpoint 0 setup failed\n");
++			return;
++		}
++		printf("SWEET USB: endpoint 0 setup failed once: HS PHY first, then again\n");
++		ud_hsphy_init();
++		phy_done = true;
++		dwc_wr(DCTL, DCTL_CSFTRST);
++		for (int w = 0; w < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); w++) {
++			delay(1000);
++		}
++		dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
++		dwc_wr(GEVNTADRHI, (uint32_t)((ud.dma_pa + UD_EVT) >> 32));
++		dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);
++		dwc_wr(GEVNTCOUNT, dwc_rd(GEVNTCOUNT) & 0xffff);
++		ud.evt_pos = 0;
++		dwc_wr(DCFG, dwc_rd(DCFG) & ~(7u | (0x7fu << 3)));
++		dwc_wr(DEVTEN, 0x7);
+ 	}
+ 	dwc_wr(DALEPENA, 0x3);
+ 	printf("SWEET USB: step start setup\n");
+ 	ud_start_setup();
+ 	printf("SWEET USB: step qscratch\n");
+-	ud_hsphy_init();
++	if (!phy_done) {
++		ud_hsphy_init();
++	}
+ 
+ 	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
+ 	if (qs != 0) {
+-- 
+2.43.0
+
