@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the Wi-Fi/modem facts wland needs from this phone's own device trees (read-only).
 
-    tools/raphael-wifi-facts.py BOOT_IMG
+    tools/raphael-wifi-facts.py BOOT_IMG [--all]     (--all: every reserved-memory carve-out, for the GPU pool)
 
 BOOT_IMG: the HackiOS package's images/twrp-original.img or the phone's boot.img (gzip kernel with
 appended DTBs). For every appended DTB: model, qcom,board-id, the reserved-memory carve-outs for the
@@ -50,7 +50,8 @@ def cells(v):
 
 
 def main():
-    img = open(sys.argv[1], 'rb').read()
+    show_all = '--all' in sys.argv
+    img = open([a for a in sys.argv[1:] if a != '--all'][0], 'rb').read()
     for i, blob in enumerate(dtbs_of(img)):
         root = fdt.parse(blob)
         model = root.props.get('model', b'').rstrip(b'\0').decode(errors='replace')
@@ -60,7 +61,7 @@ def main():
         for n in root.walk():
             path = n.path
             low = path.lower()
-            if path.startswith('/reserved-memory/') and any(k in low for k in ('modem', 'mpss', 'wlan', 'wcnss', 'pil')):
+            if path.startswith('/reserved-memory/') and (show_all or any(k in low for k in ('modem', 'mpss', 'wlan', 'wcnss', 'pil'))):
                 reg = cells(n.props.get('reg', b''))
                 if len(reg) >= 4:
                     pa, size = (reg[0] << 32) | reg[1], (reg[2] << 32) | reg[3]
