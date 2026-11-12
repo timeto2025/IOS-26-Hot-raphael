@@ -1,0 +1,301 @@
+From: raphael port <noreply@example.invalid>
+Subject: [PATCH] raphael: Redmi K20 Pro / Mi 9T Pro (SM8150) board
+
+Same SM8150 silicon as RMX1931; values measured with the raphael zero-write
+shim probe (sspp vig0 1080x2340 addr 9c000000 stride 10e0, cmd mode + TE,
+no DSC) and taken from the iOS 18 raphael port (pil_gpu_region 0x98f15000).
+
+- SWEET.h: SWEET_BOARD_RAPHAEL, early framebuffer 0x9c000000, 1080x2340
+- sweet_gpu.c / SweetHID.cpp / sweet_a6xx.h: panel height 2340, FB 0x9c000000
+- sweet_a6xx.c: zap-shader carve-out 0x98f15000
+- sweet_pmem.c: no write-combining windows until raphael's carve-outs are mapped
+- rmx1931 touch / battery / haptic / torch / audio and flame_wlan default off
+  (wrong hardware on raphael; each boot-arg =1 still forces it)
+- sweet_ufs.c: never open Android's userdata writable on raphael
+Every file that tests SWEET_BOARD_RAPHAEL includes board_config.h and #errors
+if the macro is not visible, so a silent wrong-board build cannot happen.
+---
+diff --git a/bsd/dev/flame_wlan.c b/bsd/dev/flame_wlan.c
+index f428907..9e7f911 100644
+--- a/bsd/dev/flame_wlan.c
++++ b/bsd/dev/flame_wlan.c
+@@ -24,6 +24,10 @@
+ #include <libkern/libkern.h>
+ #include <sys/flame_wlan.h>
+ #include <sweet_diag.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ void flame_wlan_init(void);
+ void flame_sta_init(void);              /* bsd/dev/flame_sta.c */
+@@ -464,6 +468,9 @@ void
+ flame_wlan_init(void)
+ {
+ 	uint32_t on = 1;
++#if SWEET_BOARD_RAPHAEL
++	on = 0;	/* first raphael boots: no Wi-Fi until its board data and firmware are staged */
++#endif
+ 	PE_parse_boot_argn("sweetwifid", &on, sizeof(on));
+ 	if (!on) {
+ 		return;
+diff --git a/bsd/dev/rmx1931_audio.c b/bsd/dev/rmx1931_audio.c
+index 687cf61..1a4a056 100644
+--- a/bsd/dev/rmx1931_audio.c
++++ b/bsd/dev/rmx1931_audio.c
+@@ -26,6 +26,10 @@
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
+ #include <sweet_diag.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ void rmx1931_audio_init(void);
+ 
+@@ -182,6 +186,9 @@ void
+ rmx1931_audio_init(void)
+ {
+ 	uint32_t on = 1;
++#if SWEET_BOARD_RAPHAEL
++	on = 0;	/* RMX1931 MAX98937 amps; raphael has TFA9874 */
++#endif
+ 	(void)PE_parse_boot_argn("rmxaudio", &on, sizeof(on));
+ 	if (!on) {
+ 		printf("RMX AUDIO: disabled (rmxaudio=0)\n");
+diff --git a/bsd/dev/rmx1931_battery.c b/bsd/dev/rmx1931_battery.c
+index 7ed8ccc..e390f0f 100644
+--- a/bsd/dev/rmx1931_battery.c
++++ b/bsd/dev/rmx1931_battery.c
+@@ -32,6 +32,10 @@
+ #include "sweet_spmi.h"
+ #include "rmx1931_battery.h"
+ #include <sweet_diag.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -456,6 +460,9 @@ rmx1931_battery_init(void)
+ 		return;
+ 	}
+ 	bq_started = true;
++#if SWEET_BOARD_RAPHAEL
++	enabled = 0;	/* RMX1931 dual-cell I2C gauge; raphael uses the PMIC fuel gauge */
++#endif
+ 	(void)PE_parse_boot_argn("rmxbattery", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		printf("RMX BATTERY: disabled (rmxbattery=0)\n");
+diff --git a/bsd/dev/rmx1931_haptic.c b/bsd/dev/rmx1931_haptic.c
+index 917b496..27229b5 100644
+--- a/bsd/dev/rmx1931_haptic.c
++++ b/bsd/dev/rmx1931_haptic.c
+@@ -40,6 +40,10 @@
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
+ #include <sweet_diag.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -675,6 +679,9 @@ rmx1931_haptic_init(void)
+ 		return;
+ 	}
+ 	aw_started = true;
++#if SWEET_BOARD_RAPHAEL
++	enabled = 0;	/* RMX1931 AW8697 haptic on I2C; not raphael hardware */
++#endif
+ 	(void)PE_parse_boot_argn("rmxhaptic", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		printf("RMX HAPTIC: disabled (rmxhaptic=0)\n");
+diff --git a/bsd/dev/rmx1931_torch.c b/bsd/dev/rmx1931_torch.c
+index 07c4578..f95f518 100644
+--- a/bsd/dev/rmx1931_torch.c
++++ b/bsd/dev/rmx1931_torch.c
+@@ -41,6 +41,10 @@
+ #include "rmx1931_battery.h"
+ 
+ #include "sweet_spmi.h"
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+ void rmx1931_torch_init(void);
+@@ -437,6 +441,9 @@ rmx1931_torch_init(void)
+ 		return;
+ 	}
+ 	tr_started = true;
++#if SWEET_BOARD_RAPHAEL
++	mode = 0;	/* RMX1931 flash LED wiring */
++#endif
+ 	(void)PE_parse_boot_argn("rmxtorch", &mode, sizeof(mode));
+ 	if (mode == 0) {
+ 		printf("RMX TORCH: disabled (rmxtorch=0)\n");
+diff --git a/bsd/dev/rmx1931_touch.c b/bsd/dev/rmx1931_touch.c
+index 5b1a755..449d3d7 100644
+--- a/bsd/dev/rmx1931_touch.c
++++ b/bsd/dev/rmx1931_touch.c
+@@ -31,6 +31,10 @@
+ #include <pexpert/pexpert.h>
+ #include <sweet_diag.h>
+ #include "sweet_spmi.h"
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -1085,6 +1089,9 @@ rmx1931_touch_init(void)
+ 		return;
+ 	}
+ 	rt.started = true;
++#if SWEET_BOARD_RAPHAEL
++	enabled = 0;	/* RMX1931 Synaptics S3706 on QUP2 SE0; raphael has Goodix GT9886 on QUP19 */
++#endif
+ 	(void)PE_parse_boot_argn("rmxtouch", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("rmxtouchlog", &rt.log, sizeof(rt.log));
+ 	(void)PE_parse_boot_argn("rmxtouch100k", &rt.i2c_100k, sizeof(rt.i2c_100k));
+diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
+index 64c9240..4030023 100644
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -657,7 +657,7 @@ static int gmu_hfi(struct a6_gpu *g)
+ /* ---- zap shader through TrustZone PAS ---- */
+ 
+ #define PAS_GPU		13
+-#define ZAP_REGION	0x99515000ull	/* RMX1931 reserved-memory pil_gpu_region */
++#define ZAP_REGION	0x98f15000ull	/* raphael reserved-memory pil_gpu_region (iOS 18 raphael port) */
+ #define ZAP_SIZE	0x2000u
+ #define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
+ 
+diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
+index e4f04ef..3f6cc87 100644
+--- a/bsd/dev/sweet_a6xx.h
++++ b/bsd/dev/sweet_a6xx.h
+@@ -48,7 +48,7 @@
+ #define A6_RING_SIZE		0x8000u
+ #define A6_RING_DW		(A6_RING_SIZE / 4)
+ 
+-#define A6_FB_PA		0x9d000000ull
++#define A6_FB_PA		0x9c000000ull	/* raphael cont_splash_region */
+ #define A6_FB_SIZE		0xa00000ull	/* mapped for the GPU: 5 x 2 MB */
+ 
+ #define A6_GPU_ID		640
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 1765fc2..2ccd010 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -577,7 +577,7 @@ present_wait_locked(uint32_t k, const char *why)
+ 	return 0;
+ }
+ #define PANEL_W		1080
+-#define PANEL_H		2400
++#define PANEL_H		2340	/* raphael 1080x2340 */
+ #define DISPLAY_DIM_OFF		0x410000ULL	/* 256 x 16x16 (64B pitch) black alpha tiles for backlight dimming */
+ #define DISPLAY_DIM_TILE	16u
+ #define DISPLAY_DIM_PITCH	(DISPLAY_DIM_TILE * 4)
+diff --git a/bsd/dev/sweet_pmem.c b/bsd/dev/sweet_pmem.c
+index c7fb5dd..147b913 100644
+--- a/bsd/dev/sweet_pmem.c
++++ b/bsd/dev/sweet_pmem.c
+@@ -37,6 +37,10 @@
+ #include <vm/vm_kern_xnu.h>
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern boolean_t pmap_valid_address(uint64_t pa);
+@@ -115,6 +119,11 @@ static LCK_MTX_DECLARE(sweet_pmem_lock, &sweet_pmem_grp);
+ static inline bool
+ pm_is_wcomb(uint64_t pa)
+ {
++#if SWEET_BOARD_RAPHAEL
++	/* RMX1931's MPSS/ADSP carve-outs; raphael's are not mapped yet. Device memory is slow but safe. */
++	(void)pa;
++	return false;
++#endif
+ 	return (pa >= PMEM_MPSS_PA && pa < PMEM_MPSS_END) ||
+ 	       (pa >= PMEM_ADSP_PA && pa < PMEM_ADSP_END);
+ }
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 5c8a75f..184518b 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -39,6 +39,10 @@
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
+ #include <machine/atomic.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+@@ -610,6 +614,14 @@ sweet_ufs_init(void)
+ 	PE_parse_boot_argn("ufsroot", want, sizeof(want));
+ 	uint32_t rw = 0;
+ 	PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
++#if SWEET_BOARD_RAPHAEL
++	/* On raphael "userdata" is Android's live f2fs: never open it writable (the
++	 * console log ring would overwrite its last 4 MiB). iOS goes on its own partition. */
++	if (rw && strcmp(want, "userdata") == 0) {
++		printf("SWEET UFS: raphael: refusing ufsrw=1 on userdata (Android); read-only\n");
++		rw = 0;
++	}
++#endif
+ 	uint32_t cache = 1, wait = 1;
+ 	PE_parse_boot_argn("ufscache", &cache, sizeof(cache));
+ 	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 934ce58..158932c 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -363,7 +363,7 @@ extern "C" int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sw
+ 
+ /* Touch reports panel pixels; flame's panel is 1080x2280 (SWEET.h). */
+ #define SWEET_PANEL_W 1080
+-#define SWEET_PANEL_H 2400
++#define SWEET_PANEL_H 2340	/* raphael */
+ class SweetHIDTouch : public IOHIDEventService {
+ 	OSDeclareDefaultStructors(SweetHIDTouch);
+ public:
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 5322c83..7c8e85b 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -57,10 +57,18 @@
+  * panel, 4320-byte rows). SWEET_EARLY_FB_BLOCK_PA is the 32MB L2 block
+  * [0x9c000000, 0x9e000000) mapped Device-GRE holding it.
+  */
+-#define SWEET_EARLY_FB_PA         0x9d000000
++/*
++ * Redmi K20 Pro / Mi 9T Pro (raphael): same SM8150 silicon, different board.
++ * Splash framebuffer at reserved-memory cont_splash_region 0x9c000000,
++ * 1080x2340 command-mode panel with TE, no DSC (measured by the raphael
++ * zero-write shim probe: sspp vig0 1080x2340 addr 9c000000 stride 10e0).
++ * SWEET_BOARD_RAPHAEL switches off every RMX1931-only peripheral driver.
++ */
++#define SWEET_BOARD_RAPHAEL       1
++#define SWEET_EARLY_FB_PA         0x9c000000
+ #define SWEET_EARLY_FB_BLOCK_PA   0x9c000000
+ #define SWEET_EARLY_FB_WIDTH      1080
+-#define SWEET_EARLY_FB_HEIGHT     2400
++#define SWEET_EARLY_FB_HEIGHT     2340
+ #define SWEET_EARLY_FB_STRIDE     4320
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt

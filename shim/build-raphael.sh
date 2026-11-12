@@ -3,7 +3,11 @@
 # as a ZERO-WRITE probe: SHIM_READONLY compiles out every UFS write, so it only reads,
 # shows what it found on the screen, and resets to fastboot.
 #
-#   shim/build-raphael.sh STOCK_BOOT_IMG [OUT]
+#   shim/build-raphael.sh STOCK_BOOT_IMG [OUT] [PAYLOAD]
+#
+# Without PAYLOAD the shim probes the hardware and shows the result. With a SWEETXNU
+# payload (tools/mkpayload.py) it boots that kernel. Either way SHIM_READONLY stays on:
+# the shim never writes UFS on raphael (its scratch area would be Android's userdata).
 #
 # STOCK_BOOT_IMG is this phone's own Android boot image (for example the installer's
 # backup session-private/<serial>/<stamp>/boot.before.img). Its appended DTB and its
@@ -13,8 +17,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd .. && pwd)
 
-STOCK=${1:?usage: shim/build-raphael.sh STOCK_BOOT_IMG [OUT]}
+STOCK=${1:?usage: shim/build-raphael.sh STOCK_BOOT_IMG [OUT] [PAYLOAD]}
 OUT=${2:-out/shim-raphael-probe.img}
+PAYLOAD=${3:-}
+if [ -n "$PAYLOAD" ]; then
+	head -c 8 "$PAYLOAD" | grep -q SWEETXNU || { echo "$PAYLOAD is not a SWEETXNU payload" >&2; exit 1; }
+fi
 
 CC="clang --target=aarch64-none-elf"
 LD="ld.lld"
@@ -45,6 +53,9 @@ size=$($NM out/raphael/shim.elf | awk '$3=="_end"{print $1}')
 truncate -s $((16#$size)) out/raphael/Image
 gzip -9 -n -c out/raphael/Image > out/raphael/Image.gz
 
+if [ -n "$PAYLOAD" ]; then
+	cp "$PAYLOAD" out/raphael/ramdisk.bin
+else
 # Empty newc ramdisk (just the trailer): the probe carries no XNU payload.
 python3 - out/raphael/ramdisk.bin <<'PY'
 import gzip, sys
@@ -55,6 +66,7 @@ data += bytes(-len(data) % 4)
 data += bytes(-len(data) % 512)
 open(sys.argv[1], 'wb').write(gzip.compress(data, 9, mtime=0))
 PY
+fi
 
 python3 "$ROOT/tools/mkbootimg_raphael_probe.py" --stock "$STOCK" \
 	--kernel out/raphael/Image.gz --ramdisk out/raphael/ramdisk.bin -o "$OUT"

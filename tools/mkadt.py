@@ -5,7 +5,7 @@ Only what the early boot path actually reads (see ios-sweet's NOTES.md); every
 MMIO address comes from the SM8150 live FDT. Defaults to iPhone 11 Pro
 (iPhone12,3 / D421AP, A13 Bionic Cebu 0x8030) for iOS 26; pass --d22ap for
 legacy iPhone X (iPhone10,3 / D22AP, A11 0x8015) iOS 16 builds.
-Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--d22ap] [--canvas-height N] [--baseband]
+Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--d22ap] [--canvas-height N] [--baseband] [--raphael]
 """
 import hashlib, os, struct, sys
 
@@ -396,8 +396,27 @@ def build(seed=None, qemu=False, highmem=False, d22ap=False, canvas_height=2499,
     ], [chosen, defaults, cpus, arm_io, fbcon, buttons, backlight] + baseband_nodes + product + ([] if qemu else [ufs, pram]))
 
 
+def use_raphael_board():
+    """Redmi K20 Pro / Mi 9T Pro (raphael): same SM8150, different board.
+
+    Measured with the raphael zero-write shim probe: cont_splash at 0x9c000000,
+    1080x2340 command-mode panel, 4320-byte rows. raphael ships with 6 or 8 GB, so the
+    DRAM window stops at the end of a 6 GB phone (0x200000000); --highmem's XNU range
+    (0x100000000 + 0xfcc00000) and /pram + the console mirror (0x1fd000000, 0x1fe000000)
+    all sit below it.
+    """
+    global FB, FB_SIZE, FB_W, FB_H, FB_STRIDE, DRAM_SIZE
+    FB, FB_SIZE = 0x9c000000, 0x2400000
+    FB_W, FB_H, FB_STRIDE = 1080, 2340, 1080 * 4
+    DRAM_SIZE = 0x180000000
+
+
 if __name__ == '__main__':
-    canvas_h = 2499
+    raphael = '--raphael' in sys.argv
+    if raphael:
+        use_raphael_board()
+    # iPhone 11 Pro canvas is 1125 wide; keep the panel's aspect: 1125 * 2340 / 1080 = 2437.5
+    canvas_h = 2437 if raphael else 2499
     for idx, arg in enumerate(sys.argv[1:], 1):
         if arg == '--canvas-height' and idx + 1 < len(sys.argv):
             canvas_h = int(sys.argv[idx + 1])
