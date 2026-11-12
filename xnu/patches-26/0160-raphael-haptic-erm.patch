@@ -1,0 +1,496 @@
+From 9a968d5e6cbf708e563cce2f3ee750a9762451ae Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Thu, 12 Nov 2026 22:58:14 +0300
+Subject: [PATCH] raphael: PM8150B ERM vibration motor driver
+ (/dev/hakios-haptic)
+
+---
+ bsd/conf/files           |   1 +
+ bsd/dev/raphael_haptic.c | 420 +++++++++++++++++++++++++++++++++++++++
+ bsd/dev/rmx1931_haptic.c |  17 +-
+ 3 files changed, 437 insertions(+), 1 deletion(-)
+ create mode 100644 bsd/dev/raphael_haptic.c
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 6ccd217..4093ac9 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@ bsd/dev/sweet_fts.c			standard
+ bsd/dev/rmx1931_touch.c			standard
+ bsd/dev/raphael_touch.c			standard
+ bsd/dev/raphael_panel.c			standard
++bsd/dev/raphael_haptic.c		standard
+ bsd/dev/rmx1931_battery.c		standard
+ bsd/dev/rmx1931_audio.c			standard
+ bsd/dev/rmx1931_torch.c			standard
+diff --git a/bsd/dev/raphael_haptic.c b/bsd/dev/raphael_haptic.c
+new file mode 100644
+index 0000000..4c1af3e
+--- /dev/null
++++ b/bsd/dev/raphael_haptic.c
+@@ -0,0 +1,420 @@
++/*
++ * Copyright (c) 2026 the IOS-26-Hot raphael port authors. MIT License.
++ *
++ * Redmi K20 Pro / Mi 9T Pro (raphael) vibration motor: the PM8150B's own haptics block.
++ *
++ * Hardware facts (this phone's dtbo, RAPHAEL entry, and the Xiaomi raphael overlay):
++ *   - qcom,haptics@c000 on PM8150B SID 3 (PPID 0x3c0), actuator type ERM (an eccentric
++ *     rotating mass motor, not an LRA), vmax 3000 mV.
++ *   - Registers (Qualcomm PMIC haptics, offsets from 0xc000): 0x0a STATUS1 (bit 3 short
++ *     circuit), 0x46 EN_CTL1 (bit 7 module), 0x4a EN_CTL3 (H-bridge, PWM, ILIM, DAC),
++ *     0x4b AUTO_RES_CTRL, 0x4c CFG1 (actuator type, 1 = ERM), 0x4e SEL (waveform source,
++ *     [5:4] 0 = VMAX), 0x51 VMAX_CFG ([5:1] in 116 mV steps), 0x52 ILIM_CFG, 0x54/0x55
++ *     RATE_CFG (play rate in 5 us steps), 0x59 SC_CLR, 0x70 PLAY (bit 7).
++ *
++ * Serves /dev/hakios-haptic with the RMX1931 driver's interface (HotAudio's Taptic path writes
++ * int16 PCM; "tap" from a shell): the motor runs while samples are loud, at least 18 ms per tap,
++ * at most 1 s at a time with a 1 s rest. Writes go only to the registers listed above, each
++ * checked against the PPID before it is sent.
++ *
++ * Boot-args: raphhaptic=0 turns it off; raphhaptic_mv=N sets the drive (1000..3000 mV, default 3000).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/conf.h>
++#include <sys/errno.h>
++#include <sys/uio.h>
++#include <sys/proc.h>
++#include <libkern/libkern.h>
++#include <sys/sysctl.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/locks.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include "sweet_spmi.h"
++#include <sweet_diag.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
++
++#if SWEET_BOARD_RAPHAEL
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++void raphael_haptic_init(void);
++void raphael_haptic_diag_snapshot(struct sweet_diag_peripherals *out);
++
++#define HP_SPMI_CORE    0x0c440000u
++#define HP_SPMI_CHNLS   0x0c600000u
++#define HP_SPMI_OBS     0x0e600000u
++#define HP_SPMI_CNFG    0x0c40a000u
++#define HP_SID          3u
++#define HP_BASE         0xc000u
++#define HP_PPID         ((HP_SID << 8) | (HP_BASE >> 8))        /* 0x3c0 */
++
++#define HP_TYPE         0x04u
++#define HP_SUBTYPE      0x05u
++#define HP_STATUS1      0x0au
++#define HP_SC_BIT       0x08u
++#define HP_EN_CTL1      0x46u
++#define HP_EN_CTL3      0x4au
++#define HP_AUTO_RES     0x4bu
++#define HP_CFG1         0x4cu
++#define HP_SEL          0x4eu
++#define HP_VMAX         0x51u
++#define HP_ILIM         0x52u
++#define HP_RATE1        0x54u
++#define HP_RATE2        0x55u
++#define HP_SC_CLR       0x59u
++#define HP_PLAY         0x70u
++
++#define HP_SILENT_PEAK  64u
++#define HP_ACTIVE_US    28000ull
++#define HP_TAP_US       18000ull
++#define HP_MAX_PLAY_US  1000000ull
++
++static vm_offset_t hp_core, hp_cnfg, hp_obs, hp_ch;
++static uint16_t hp_apid = 0xffffu;
++static bool hp_started, hp_broken;
++static uint32_t hp_mv = 3000;
++static int hp_sleep_chan, hp_wake_chan;
++static volatile uint64_t hp_heard_us;
++static volatile uint32_t hp_heard_peak;
++static uint32_t hp_events;
++static LCK_GRP_DECLARE(raph_haptic_grp, "raph-haptic");
++static LCK_MTX_DECLARE(raph_haptic_lock, &raph_haptic_grp);
++
++static uint32_t
++hp_rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++hp_wr32(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++hp_wait_ms(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&hp_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static uint64_t
++hp_now_us(void)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000u;
++}
++
++static bool
++hp_read(uint8_t reg, uint8_t *out)
++{
++	if (hp_apid == 0xffffu || !hp_obs) {
++		return false;
++	}
++	uint32_t off = 0x80u * (uint32_t)hp_apid;
++	bool ok = false;
++	bool intrs = sweet_spmi_bus_acquire();
++	hp_wr32(hp_obs, off, (1u << 27) | ((uint32_t)reg << 4));
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t st = hp_rd32(hp_obs, off + 0x08u);
++		if (st & 1u) {
++			if ((st & 0x0eu) == 0) {
++				*out = (uint8_t)hp_rd32(hp_obs, off + 0x18u);
++				ok = true;
++			}
++			break;
++		}
++		delay(1);
++	}
++	sweet_spmi_bus_release(intrs);
++	return ok;
++}
++
++static bool
++hp_writable(uint8_t reg)
++{
++	switch (reg) {
++	case HP_EN_CTL1: case HP_EN_CTL3: case HP_AUTO_RES: case HP_CFG1: case HP_SEL:
++	case HP_VMAX: case HP_ILIM: case HP_RATE1: case HP_RATE2: case HP_SC_CLR: case HP_PLAY:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static bool
++hp_write(uint8_t reg, uint8_t val)
++{
++	if (hp_broken || !hp_ch || hp_apid == 0xffffu || !hp_writable(reg) ||
++	    ((hp_rd32(hp_core, 0x900u + 4u * (uint32_t)hp_apid) >> 8) & 0xfffu) != HP_PPID) {
++		hp_broken = true;
++		return false;
++	}
++	bool ok = false;
++	lck_mtx_lock(&raph_haptic_lock);
++	bool intrs = sweet_spmi_bus_acquire();
++	hp_wr32(hp_ch, 0x10u, val);
++	hp_wr32(hp_ch, 0x00u, ((uint32_t)reg << 4));
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t st = hp_rd32(hp_ch, 0x08u);
++		if (st & 1u) {
++			ok = (st & 0x0eu) == 0;
++			break;
++		}
++		delay(1);
++	}
++	sweet_spmi_bus_release(intrs);
++	lck_mtx_unlock(&raph_haptic_lock);
++	if (!ok) {
++		printf("RAPH HAPTIC: SPMI write reg %#x failed; driver stopped\n", reg);
++		hp_broken = true;
++	}
++	return ok;
++}
++
++static bool
++hp_stop(void)
++{
++	bool ok = hp_write(HP_PLAY, 0);
++	delay(1000);
++	return hp_write(HP_EN_CTL1, 0) && ok;
++}
++
++static bool
++hp_start(void)
++{
++	uint8_t st = 0;
++	if (hp_read(HP_STATUS1, &st) && (st & HP_SC_BIT)) {
++		printf("RAPH HAPTIC: short circuit reported (status1 %#x); driver stopped\n", st);
++		(void)hp_write(HP_SC_CLR, 1);
++		hp_broken = true;
++		return false;
++	}
++	return hp_write(HP_EN_CTL1, 0x80u) && hp_write(HP_PLAY, 0x80u);
++}
++
++static bool
++hp_configure(void)
++{
++	uint32_t rate = 5715u / 5u;     /* default play rate, 5 us steps */
++	return hp_write(HP_EN_CTL1, 0) &&
++	       hp_write(HP_PLAY, 0) &&
++	       hp_write(HP_CFG1, 1u) &&                 /* ERM */
++	       hp_write(HP_ILIM, 0x02u) &&              /* 1000 mA limit */
++	       hp_write(HP_EN_CTL3, 0xfdu) &&           /* H-bridge, PWM signal, ILIM, ILIM CC, RBIAS, DAC, PWM ctl */
++	       hp_write(HP_AUTO_RES, 0) &&              /* no auto-resonance on an ERM */
++	       hp_write(HP_RATE1, (uint8_t)(rate & 0xffu)) &&
++	       hp_write(HP_RATE2, (uint8_t)((rate >> 8) & 0x0fu)) &&
++	       hp_write(HP_VMAX, (uint8_t)(((hp_mv / 116u) << 1) & 0x3eu)) &&
++	       hp_write(HP_SEL, 0);                     /* waveform from VMAX: a steady drive */
++}
++
++static int
++hp_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++hp_heard(uint32_t peak)
++{
++	if (peak <= HP_SILENT_PEAK) {
++		return;
++	}
++	hp_heard_us = hp_now_us();
++	hp_heard_peak = peak;
++	wakeup(&hp_wake_chan);
++}
++
++static int
++hp_write_dev(__unused dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	int16_t samples[512];
++	int err = 0;
++	if (uio_resid(uio) > 0 && uio_resid(uio) <= 8) {
++		char cmd[8];
++		int len = (int)uio_resid(uio);
++		err = uiomove(cmd, len, uio);
++		if (!err && (cmd[0] == 't' || (cmd[0] >= '1' && cmd[0] <= '9'))) {
++			hp_heard(24000u);
++		}
++		return err;
++	}
++	while (!err && uio_resid(uio) >= 2) {
++		user_ssize_t bytes = uio_resid(uio);
++		if (bytes > (user_ssize_t)sizeof(samples)) {
++			bytes = (user_ssize_t)sizeof(samples);
++		}
++		bytes &= ~(user_ssize_t)1;
++		err = uiomove((caddr_t)samples, (int)bytes, uio);
++		uint32_t peak = 0;
++		for (uint32_t i = 0; !err && i < (uint32_t)(bytes / 2); ++i) {
++			uint32_t v = samples[i] < 0 ? (uint32_t)(-(int32_t)samples[i]) : (uint32_t)samples[i];
++			peak = v > peak ? v : peak;
++		}
++		hp_heard(peak);
++	}
++	if (!err && uio_resid(uio) > 0) {
++		uio_setresid(uio, 0);
++	}
++	return err;
++}
++
++static const struct cdevsw raph_haptic_cdevsw = {
++	.d_open       = hp_open,
++	.d_close      = hp_open,
++	.d_read       = eno_rdwrt,
++	.d_write      = hp_write_dev,
++	.d_ioctl      = eno_ioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = 0,
++};
++
++static void
++hp_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	bool playing = false;
++	uint64_t since = 0, rest_until = 0;
++	while (!hp_broken) {
++		uint64_t now = hp_now_us(), heard = hp_heard_us;
++		bool active = heard != 0 && now - heard < HP_ACTIVE_US;
++		if (!playing) {
++			if (active && now >= rest_until && hp_start()) {
++				playing = true;
++				since = now;
++				if (++hp_events <= 8) {
++					printf("RAPH HAPTIC: event #%u (peak %u)\n", hp_events, hp_heard_peak);
++				}
++			}
++		} else if (now - since >= HP_MAX_PLAY_US) {
++			(void)hp_stop();
++			playing = false;
++			rest_until = now + HP_MAX_PLAY_US;
++		} else if (!active && now - since >= HP_TAP_US) {
++			(void)hp_stop();
++			playing = false;
++		}
++		if (playing) {
++			hp_wait_ms(4);
++		} else {
++			uint64_t deadline;
++			clock_interval_to_deadline(200, NSEC_PER_MSEC, &deadline);
++			(void)assert_wait_deadline(&hp_wake_chan, THREAD_UNINT, deadline);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++	}
++	if (hp_ch) {
++		hp_broken = false;      /* one last try to leave the motor off */
++		(void)hp_stop();
++		hp_broken = true;
++	}
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++raphael_haptic_init(void)
++{
++	uint32_t on = 1;
++	thread_t thread;
++	if (hp_started) {
++		return;
++	}
++	hp_started = true;
++	(void)PE_parse_boot_argn("raphhaptic", &on, sizeof(on));
++	if (!on) {
++		printf("RAPH HAPTIC: disabled (raphhaptic=0)\n");
++		return;
++	}
++	(void)PE_parse_boot_argn("raphhaptic_mv", &hp_mv, sizeof(hp_mv));
++	if (hp_mv < 1000u || hp_mv > 3000u) {
++		hp_mv = 3000u;
++	}
++	(void)sweet_spmi_init();
++	hp_core = ml_io_map(HP_SPMI_CORE, 0x2000);
++	hp_cnfg = ml_io_map(HP_SPMI_CNFG, 0x1000);
++	hp_obs = ml_io_map(HP_SPMI_OBS, 0x10000);
++	if (!hp_core || !hp_cnfg || !hp_obs) {
++		printf("RAPH HAPTIC: SPMI map failed\n");
++		return;
++	}
++	uint32_t napids = hp_rd32(hp_core, 4u) & 0x7ffu;
++	if (napids == 0 || napids > 512u) {
++		printf("RAPH HAPTIC: SPMI arbiter not as expected\n");
++		return;
++	}
++	uint16_t found = 0xffffu;
++	uint32_t owner = 7u;
++	for (uint32_t i = 0; i < napids; ++i) {
++		uint32_t map = hp_rd32(hp_core, 0x900u + 4u * i);
++		if (map && ((map >> 8) & 0xfffu) == HP_PPID) {
++			uint32_t own = hp_rd32(hp_cnfg, 0x700u + 4u * i) & 7u;
++			if (found == 0xffffu || own == 0) {
++				found = (uint16_t)i;
++				owner = own;
++			}
++		}
++	}
++	if (found == 0xffffu || owner != 0) {
++		printf("RAPH HAPTIC: PM8150B haptics (ppid %#x) not ours: apid %#x owner %u\n", HP_PPID, found, owner);
++		return;
++	}
++	hp_apid = found;
++	uint8_t type = 0, subtype = 0;
++	if (!hp_read(HP_TYPE, &type) || !hp_read(HP_SUBTYPE, &subtype) || type == 0 || type == 0xffu) {
++		printf("RAPH HAPTIC: no haptics peripheral at ppid %#x (type %#x)\n", HP_PPID, type);
++		hp_apid = 0xffffu;
++		return;
++	}
++	hp_ch = ml_io_map((vm_offset_t)(HP_SPMI_CHNLS + 0x10000ul * (uintptr_t)found), 0x1000);
++	if (!hp_ch || !hp_configure()) {
++		printf("RAPH HAPTIC: setup failed\n");
++		return;
++	}
++	int major = cdevsw_add(-1, &raph_haptic_cdevsw);
++	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666,
++	    "hakios-haptic") == NULL) {
++		printf("RAPH HAPTIC: failed to create /dev/hakios-haptic\n");
++		return;
++	}
++	printf("RAPH HAPTIC: /dev/hakios-haptic ready (PM8150B ERM ppid %#x apid %u type %#x sub %#x, %u mV)\n",
++	    HP_PPID, found, type, subtype, hp_mv);
++	if (kernel_thread_start(hp_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
++void
++raphael_haptic_diag_snapshot(struct sweet_diag_peripherals *out)
++{
++	if (out != NULL) {
++		out->haptic_ready = hp_ch != 0 && !hp_broken;
++		out->haptic_events = hp_events;
++		out->haptic_faults = hp_broken ? 1u : 0u;
++	}
++}
++#endif /* SWEET_BOARD_RAPHAEL */
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/rmx1931_haptic.c b/bsd/dev/rmx1931_haptic.c
+index 27229b5..627ba29 100644
+--- a/bsd/dev/rmx1931_haptic.c
++++ b/bsd/dev/rmx1931_haptic.c
+@@ -44,6 +44,10 @@
+ #if !defined(SWEET_BOARD_RAPHAEL)
+ #error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
+ #endif
++#if SWEET_BOARD_RAPHAEL
++void raphael_haptic_init(void);
++void raphael_haptic_diag_snapshot(struct sweet_diag_peripherals *out);
++#endif
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -680,7 +684,12 @@ rmx1931_haptic_init(void)
+ 	}
+ 	aw_started = true;
+ #if SWEET_BOARD_RAPHAEL
+-	enabled = 0;	/* RMX1931 AW8697 haptic on I2C; not raphael hardware */
++	enabled = 0;	/* RMX1931 AW8697 haptic on I2C; raphael's motor is the PM8150B's own (raphael_haptic.c) */
++	(void)PE_parse_boot_argn("rmxhaptic", &enabled, sizeof(enabled));
++	if (!enabled) {
++		raphael_haptic_init();
++		return;
++	}
+ #endif
+ 	(void)PE_parse_boot_argn("rmxhaptic", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+@@ -700,6 +709,12 @@ rmx1931_haptic_diag_snapshot(struct sweet_diag_peripherals *out)
+ 	if (out == NULL) {
+ 		return;
+ 	}
++#if SWEET_BOARD_RAPHAEL
++	if (aw_gpio == 0) {
++		raphael_haptic_diag_snapshot(out);
++		return;
++	}
++#endif
+ 	out->haptic_ready = (aw_gpio != 0 && !aw_broken);
+ 	out->haptic_events = (uint32_t)sys_haptic_events;
+ 	out->haptic_faults = aw_broken ? 1u : 0u;
+-- 
+2.43.0
+
