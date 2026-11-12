@@ -40,7 +40,8 @@ def dtbs_of(img):
                 fdt.parse(blob)
             except Exception:
                 continue
-            out.append(blob)
+            if blob not in out:
+                out.append(blob)
             pos = at + size
 
 
