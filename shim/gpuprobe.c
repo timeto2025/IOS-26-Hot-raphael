@@ -711,7 +711,11 @@ static void gmu_hfi(void (*save)(const char *), int cb)
 /* ---- stage 4: zap shader through TrustZone PAS (qcom_scm + mdt_loader) ---- */
 
 #define PAS_GPU		13
+#ifdef BOARD_RAPHAEL
+#define ZAP_REGION	0x98f15000UL	/* raphael reserved-memory pil_gpu_region */
+#else
 #define ZAP_REGION	0x9a915000UL	/* reserved-memory pil_gpu_region, 8K */
+#endif
 #define ZAP_SIZE	0x2000UL
 #define ZAP_META	(GMEM + 0xa0000)	/* metadata buffer TZ reads */
 #define SCM_PIL(cmd)	(0x42000000UL | (2u << 8) | (cmd))	/* SMC64 std call, SIP, svc PIL */

@@ -55,6 +55,10 @@ static volatile int in_exception;
 
 static void pstore_save_log(void)
 {
+#ifdef BOARD_RAPHAEL
+	/* RMX1931's ramoops address; raphael's is not mapped out yet, so leave RAM alone. */
+	return;
+#endif
 	volatile uint32_t *hdr = (volatile uint32_t *)PSTORE_PMSG_BASE;
 	volatile uint8_t *dst = (volatile uint8_t *)(PSTORE_PMSG_BASE + 12UL);
 	uint32_t n = log_len < PSTORE_PMSG_CAP ? log_len : PSTORE_PMSG_CAP;
@@ -224,7 +228,12 @@ static void log_gic(void)
 /* Plain RAM where XNU will live: is it there and writable with the MMU off? */
 static void log_ram(void)
 {
+#ifdef BOARD_RAPHAEL
+	/* raphael ships with 6 or 8 GB; 0x27ff00000 is past the end of a 6 GB phone. */
+	static const uint64_t probe[] = { 0x100000000ULL, 0x180000000ULL, 0x1fff00000ULL };
+#else
 	static const uint64_t probe[] = { 0x100000000ULL, 0x180000000ULL, 0x1fff00000ULL, 0x27ff00000ULL };
+#endif
 	for (unsigned i = 0; i < sizeof(probe) / sizeof(probe[0]); i++) {
 		volatile uint64_t *p = (volatile uint64_t *)(uintptr_t)probe[i];
 		uint64_t old = p[0];
@@ -334,7 +343,7 @@ static void readonly_viewer(int spmi_ok)
 			redraw = 0;
 			char hdr1[80], hdr2[80];
 			unsigned n1 = fmt_snprintf(hdr1, sizeof(hdr1),
-				"RMX1931 XNU SHIM PROBE (ZERO-WRITE)  p%u/%u  keys=%x",
+				 BOARD_NAME " XNU SHIM PROBE (ZERO-WRITE)  p%u/%u  keys=%x",
 				cur + 1, pages, keys);
 			unsigned n2 = fmt_snprintf(hdr2, sizeof(hdr2),
 				"Fastboot in %us | VOL+/VOL-: page | PWR: exit now", rem);
@@ -359,7 +368,7 @@ static void save_before_jump(void)
 
 void shim_main(uintptr_t dtb)
 {
-	log_printf("RMX1931 SHIM probe v1 t=%lu\n", ticks_now());
+	log_printf(BOARD_NAME " SHIM probe v1 t=%lu\n", ticks_now());
 	log_cpu(dtb);
 	int spmi_ok = !spmi_init();
 	if (spmi_ok) {
@@ -433,7 +442,7 @@ void shim_main(uintptr_t dtb)
 	}
 	if (con_ok) {
 		con_clear(0xff102438);
-		con_str("RMX1931", "shim probe v1");
+		con_str(BOARD_NAME, "shim probe v1");
 	}
 	sde_autorefresh(1);
 	if (!sde.tear_en)

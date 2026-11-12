@@ -5,10 +5,19 @@
  * Text console on the splash framebuffer ABL scans out. Geometry comes from
  * the display pipe at runtime (con_init); 32 bpp, little-endian a8r8g8b8.
  */
+#ifdef BOARD_RAPHAEL
+#define FB_SPLASH_BASE	0x9c000000UL	/* raphael reserved-memory cont_splash_region (36 MiB) */
+#define FB_SPLASH_SIZE	0x02400000UL
+#define FB_W		1080
+#define FB_H		2340
+#define BOARD_NAME	"RAPHAEL"
+#else
 #define FB_SPLASH_BASE	0x9d000000UL	/* RMX1931 reserved-memory cont_splash_region */
 #define FB_SPLASH_SIZE	0x02400000UL
 #define FB_W		1080
 #define FB_H		2400
+#define BOARD_NAME	"RMX1931"
+#endif
 
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U
