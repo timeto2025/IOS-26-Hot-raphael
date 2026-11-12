@@ -83,7 +83,7 @@ def dtbo_entries(img):
     """Android dtbo.img: header 'd7b7ab1e', then entries (size, offset) pointing at FDT overlays."""
     if img[:4] != b'\xd7\xb7\xab\x1e':
         return []
-    _, total, hdr, esz, count, eoff = struct.unpack_from('>6I', img, 4)
+    total, hdr, esz, count, eoff, _ = struct.unpack_from('>6I', img, 4)
     out = []
     for i in range(count):
         size, off = struct.unpack_from('>2I', img, eoff + i * esz)
