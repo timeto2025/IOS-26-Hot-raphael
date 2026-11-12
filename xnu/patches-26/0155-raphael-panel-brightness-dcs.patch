@@ -23,10 +23,10 @@ index 8dd16d2..6ccd217 100644
  bsd/dev/rmx1931_torch.c			standard
 diff --git a/bsd/dev/raphael_panel.c b/bsd/dev/raphael_panel.c
 new file mode 100644
-index 0000000..ff4b9aa
+index 0000000..b3f7b7a
 --- /dev/null
 +++ b/bsd/dev/raphael_panel.c
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,210 @@
 +/*
 + * Redmi K20 Pro (raphael): real panel brightness for IOS-26-Hot.
 + *
@@ -55,6 +55,7 @@ index 0000000..ff4b9aa
 +#include <sys/param.h>
 +#include <sys/systm.h>
 +#include <kern/locks.h>
++#include <kern/clock.h>
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
 +#include <pexpert/arm64/board_config.h>
