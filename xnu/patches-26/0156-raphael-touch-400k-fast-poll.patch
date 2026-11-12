@@ -1,0 +1,61 @@
+From: raphael port <noreply@example.invalid>
+Subject: [PATCH] raphael: GT9886 touch at 400 kHz, 4 ms polling while active
+
+The first driver polled every 10 ms at 100 kHz I2C (IOS-26-Hot's generic
+default). RMX1931's driver runs its controller at 400 kHz and polls every 4 ms
+while a finger is down; do the same: 400 kHz SCL from the 19.2 MHz XO (values
+from the GENI I2C clock table), 4 ms while the IRQ line is low or contacts are
+active, 8 ms when idle. raphtouch100k=1 restores 100 kHz.
+---
+diff --git a/bsd/dev/raphael_touch.c b/bsd/dev/raphael_touch.c
+index c313be1..091b5ab 100644
+--- a/bsd/dev/raphael_touch.c
++++ b/bsd/dev/raphael_touch.c
+@@ -26,7 +26,7 @@
+  *
+  * Boot-args: raphtouch=0 disables it, raphtouchlog=1 prints every frame,
+  * raphtouchflip=N mirrors axes (bit 0 x, bit 1 y; default from the sensor ID),
+- * raphtouchdelay=S seconds before touching the bus (default 20).
++ * raphtouchdelay=S seconds before touching the bus (default 20), raphtouch100k=1 slow I2C.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -521,7 +521,14 @@ rt_se_init(void)
+ 	rt_wr(rt.se, 0x20, 1);
+ 	rt_wr(rt.se, SE_CLK_SEL, rt.clk_level);
+ 	rt_wr(rt.se, SE_MCLK, (7u << 4) | 1u);
+-	rt_wr(rt.se, SE_SCL, (10u << 20) | (11u << 10) | 26u); /* 100 kHz from 19.2 MHz */
++	unsigned slow = 0;
++	(void)PE_parse_boot_argn("raphtouch100k", &slow, sizeof(slow));
++	if (slow) {
++		rt_wr(rt.se, SE_SCL, (10u << 20) | (11u << 10) | 26u); /* 100 kHz from 19.2 MHz */
++	} else {
++		rt_wr(rt.se, SE_SCL, (5u << 20) | (12u << 10) | 24u);  /* 400 kHz from 19.2 MHz */
++	}
++	printf("RAPH TOUCH: I2C %s kHz\n", slow ? "100" : "400");
+ 	rt_wr(rt.se, 0x254, 0);
+ 	rt_wr(rt.se, 0x260, SE_PACK0);
+ 	rt_wr(rt.se, 0x264, SE_PACK1);
+@@ -605,7 +612,7 @@ rt_thread(void *arg, wait_result_t result)
+ 	int flip = -1;
+ 	(void)PE_parse_boot_argn("raphtouchflip", &flip, sizeof(flip));
+ 	rt.flip = flip >= 0 ? ((unsigned)flip & 3u) : (rt.sensor == 0 ? 3u : 0u);
+-	printf("RAPH TOUCH: GT9886 ready, sensor %u, flip %u, %dx%d, polling every 10 ms\n",
++	printf("RAPH TOUCH: GT9886 ready, sensor %u, flip %u, %dx%d, polling 4 ms active / 8 ms idle\n",
+ 	    rt.sensor, rt.flip, RT_W, RT_H);
+ 	unsigned errors = 0;
+ 	while (!rt.dead) {
+@@ -620,7 +627,9 @@ rt_thread(void *arg, wait_result_t result)
+ 		} else {
+ 			errors = 0;
+ 		}
+-		rt_wait(10);
++		/* The IC pulls IRQ (pin 122) low while a frame waits: poll fast then and while fingers are down. */
++		bool pending = (rt_rd(rt.gpio, GPIO_IO(RT_PIN_IRQ)) & 1u) == 0;
++		rt_wait((pending || rt.active) ? 4u : 8u);
+ 	}
+ 	rt_report(0, rt.x, rt.y);
+ out:
+-- 
+2.43.0
+
