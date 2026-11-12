@@ -5,6 +5,7 @@
  * ready, capabilities, board data download, then on FW ready: wlan config
  * (the copy engine tables from ath10k snoc.c) and mission mode.
  */
+#include <sys/sysctl.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,8 +32,33 @@
 #define FW_INIT_DONE_IND 0x38
 
 #define CLIENT_ID	0x4b4e454c	/* ath10k's */
-#define MSA_PA		0x9b000000ull	/* RMX1931 pil_wlan_fw_region */
-#define MSA_SIZE	0x180000u	/* RMX1931 qcom,wlan-msa-memory (1.5 MiB) */
+/* WLAN firmware (MSA) carve-out, DT pil_wlan_fw_region: RMX1931 0x9b000000 + 1.5 MiB by default;
+ * another board passes its own with the boot-arg wlanmsa=0xPA:0xSIZE (raphael 0x8bc00000:0x180000). */
+static unsigned long long MSA_PA = 0x9b000000ull;
+static unsigned int MSA_SIZE = 0x180000u;
+
+static void msa_from_bootargs(void)
+{
+	static int done;
+	char args[1024] = "";
+	size_t n = sizeof(args) - 1;
+	if (done++ || sysctlbyname("kern.bootargs", args, &n, NULL, 0) != 0)
+		return;
+	const char *p = strstr(args, "wlanmsa=");
+	if (!p)
+		return;
+	char *end = NULL;
+	unsigned long long pa = strtoull(p + 8, &end, 0), sz = 0;
+	if (end && *end == ':')
+		sz = strtoull(end + 1, NULL, 0);
+	if (pa && sz && sz < 0x10000000ull && !(pa & 0xfff) && !(sz & 0xfff)) {
+		MSA_PA = pa;
+		MSA_SIZE = (unsigned int)sz;
+		printf("wlfw: MSA region %llx+%x (wlanmsa)\n", MSA_PA, MSA_SIZE);
+	} else {
+		fprintf(stderr, "wlfw: bad wlanmsa=, keeping %llx+%x\n", MSA_PA, MSA_SIZE);
+	}
+}
 #define BDF_PATH	"/var/local/fw/modem/bdwlan-rmx1931.bin"
 #define BDF_PATH2	"/var/local/fw/modem/bdwlan.bin"
 #define BDF_PATH3	"/var/local/fw/modem/bdwlan-flame.bin"
@@ -257,6 +283,7 @@ int wlfw_start(void)
 				return -1;
 		}
 
+		msa_from_bootargs();
 		qmi_start(&q, QMI_REQUEST, 0, MSA_INFO);
 		qmi_tlv_u64(&q, 0x01, MSA_PA);
 		qmi_tlv_u32(&q, 0x02, MSA_SIZE);
