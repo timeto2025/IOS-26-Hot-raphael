@@ -33,6 +33,11 @@ mkdir -p "$WORK" "$(dirname "$OUT")"
 rm -rf "$WORK/userland"
 mkdir -p "$WORK/userland"
 tar -xzf "$USERLAND" -C "$WORK/userland"
+# EXTRA_USERLAND=raphael-tools.tar.gz (the fork's raphael-tools workflow): newer wland + dash on top
+if [[ -n "${EXTRA_USERLAND:-}" ]]; then
+	tar -xzf "$EXTRA_USERLAND" -C "$WORK/userland"
+	echo "extra userland: $(tar -tzf "$EXTRA_USERLAND" | grep -c '^./bin/.') tools from $EXTRA_USERLAND"
+fi
 
 CMDLINE="debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress"
 CMDLINE+=" rd=ufsroot0 ufsroot=darwin ufsrw=1 rootrw=1 ufslogsecs=5"

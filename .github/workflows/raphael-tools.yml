@@ -1,0 +1,69 @@
+name: raphael-tools
+
+# Small userland pieces for the K20 Pro on top of the released ios-userland-hot-v0.8.1 tarball:
+# wland (Wi-Fi, with wlanmpss=/wlanmsa=) and dash (/bin/sh for SSH). No Mesa/Metal build, so it
+# runs on any macOS runner in a few minutes. tools/raphael-ios-boot.sh merges it with EXTRA_USERLAND=.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: macOS runner label
+        default: macos-15-intel
+  push:
+    branches: [master]
+    paths:
+      - "phone/wifi/**"
+      - ".github/workflows/raphael-tools.yml"
+
+concurrency:
+  group: raphael-tools-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: wland
+        run: |
+          chmod +x work/userland/bin/ios-cc phone/wifi/build.sh
+          sh phone/wifi/build.sh
+          file phone/wifi/out/wland
+
+      - name: dash (/bin/sh)
+        run: |
+          set -e
+          mkdir -p work/userland/src
+          CC_IOS="$PWD/work/userland/bin/ios-cc"
+          if curl -sfL http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz | tar xzf - -C work/userland/src \
+              && [ -x work/userland/src/dash-0.5.12/configure ]; then
+            cd work/userland/src/dash-0.5.12
+          else
+            brew install autoconf automake >/dev/null
+            rm -rf work/userland/src/dash-0.5.12
+            git clone --depth 1 --branch v0.5.12 https://git.kernel.org/pub/scm/utils/dash/dash.git work/userland/src/dash-0.5.12
+            cd work/userland/src/dash-0.5.12
+            ./autogen.sh
+          fi
+          CC="$CC_IOS" CC_FOR_BUILD=/usr/bin/clang ac_cv_func_strchrnul=no ac_cv_func_stat64=no ac_cv_func_open64=no \
+            ./configure --host=aarch64-apple-darwin
+          make -j4
+          strip -x src/dash
+          codesign -f -s - src/dash
+          file src/dash
+
+      - name: Package
+        run: |
+          mkdir -p dist/bin
+          cp phone/wifi/out/wland dist/bin/
+          cp work/userland/src/dash-0.5.12/src/dash dist/bin/
+          tar czf raphael-tools.tar.gz -C dist .
+          tar tzvf raphael-tools.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raphael-tools
+          path: raphael-tools.tar.gz
