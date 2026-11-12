@@ -69,6 +69,8 @@ fi
 # Canvas 1125x2499 like RMX1931: the kernel's framebuffer (SWEET_FB_LOGICAL_H) and touch (SweetHID)
 # present a 1125x2499 display; a 2437 ADT canvas made backboardd render 1125x2437 into it and
 # grow its GPU pool share until allocations failed (missing icons, wallpaper, Control Center).
+# EXTRA_ARGS="a=1 b=2": appended to the boot args (A/B tests, e.g. raphpanel=0 or GPURESERVE checks)
+[[ -n "${EXTRA_ARGS:-}" ]] && CMDLINE+=" $EXTRA_ARGS"
 python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael --canvas-height 2499
 
 overlay_args=(-o "$WORK/ios26-overlay-raphael.tar" --root-img "$ROOTIMG"
