@@ -7,6 +7,7 @@
 #   iOS running, USB Ethernet up  -> sets 192.168.7.1 on the phone's USB interface (sudo), then
 #                                    kernel log + status (hot-dbg) and wland logs over SSH
 #   phone in TWRP                 -> kernel log ring from the end of darwin (read-only)
+#   PHONE=IP tools/raphael-collect-logs.sh  -> iOS over Wi-Fi (same logs, no USB needed)
 # Result: logs/raphael-logs-DATE.tar.gz (path printed at the end). Nothing on the phone is changed.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -25,6 +26,10 @@ if adb devices 2>/dev/null | grep -q 'recovery$'; then
 		rm -f "$OUT/ios-log.bin"
 		got=1
 	fi
+elif [[ -n "${PHONE:-}" ]]; then
+	HOST=$PHONE
+	echo "iOS over the network at $HOST"
+	ping -c 1 -W 3 "$HOST" >/dev/null 2>&1 || { echo "$HOST does not answer"; rmdir "$OUT"; exit 1; }
 else
 	# the phone's USB Ethernet has a fixed MAC (ios-sweet sweet_usb.c)
 	IF=$(ip -br link | awk 'tolower($3) == "02:00:5e:77:ee:01" { print $1; exit }')
@@ -46,6 +51,7 @@ else
 		ping -c 1 -W 2 192.168.7.2 >/dev/null 2>&1 && { ok=1; break; }
 		sleep 2
 	done
+	HOST=192.168.7.2
 	if [[ $ok == 0 ]]; then
 		echo "the phone does not answer on 192.168.7.2 (USB data path stuck)."
 		echo "  replug the cable and run this again, or boot TWRP and run this again:"
@@ -53,10 +59,13 @@ else
 		rmdir "$OUT" 2>/dev/null
 		exit 1
 	fi
-	timeout 60 python3 tools/hot-dbg.py connect 192.168.7.2 >/dev/null 2>&1
+fi
+
+if [[ -n "${HOST:-}" ]]; then
+	timeout 60 python3 tools/hot-dbg.py connect "$HOST" >/dev/null 2>&1
 	timeout 60 python3 tools/hot-dbg.py klog > "$OUT/klog.txt" 2>&1 && got=1
 	timeout 60 python3 tools/hot-dbg.py status > "$OUT/status.txt" 2>&1
-	SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new root@192.168.7.2)
+	SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "root@$HOST")
 	if timeout 20 "${SSH[@]}" true 2>"$OUT/ssh-error.txt"; then
 		rm -f "$OUT/ssh-error.txt"
 		for f in wland.log wland.log.prev netsvc.log dropbear.log hotstored.log; do
