@@ -1,13 +1,18 @@
 # IOS-26-Hot on the Redmi K20 Pro / Mi 9T Pro (raphael)
 
-Status: bring-up. Nothing here writes the phone's flash: every test is `fastboot boot` only.
+Status: iOS 26 boots to SpringBoard from `darwin`; the iOS boot image can live in a moved 128 MiB `recovery`
+(power + volume up). Kernel tests still go through `fastboot boot`.
 
 | Step | What | Result |
 |---|---|---|
 | 1 | Zero-write shim probe (`shim/build-raphael.sh`) | **Works**: 8 cores, 6 GB RAM, SPMI/PMIC, UFS read, display 1080x2340 @ 0x9c000000 (cmd mode + TE, no DSC) |
 | 2 | XNU 0152 kernel boots with no root (`tools/raphael-kernel-test.sh`) | **Works**: 8/8 CPUs, AMP E/P, AMFI/Sandbox/HFS up, stops at "Waiting on ... Apple_HFS" (no root given) |
 | 3 | Goodix GT9886 touch, patch 0153 (`raphtouchlog=1` prints frames) | **Works**: touches reported; volume keys scroll the console (needs `sweetprobe=1`) |
-| 4 | iOS 26 root in the `darwin` partition (replaces HackiOS iOS 16.5), writable: 60G HFSX from `build-rootfs`, boot image from `tools/raphael-ios-boot.sh` | **Boots to SpringBoard** (software rendering, some icons missing) |
+| 4 | iOS 26 root in `darwin` (28G HFSX from `build-rootfs`, written with `tools/raphael-write-darwin.py`), boot image from `tools/raphael-ios-boot.sh` | **Works**: SpringBoard, GPU (Adreno 640, HotMetal2), USB Ethernet + `hot-dbg`, static wallpaper; canvas 1125x2499 |
+| 4a | Touch retries with a power cycle (0154) | **Works**: GT9886 starts on the first attempt after warm restarts |
+| 4b | Real AMOLED brightness by DCS 0x51 (0155, `bsd/dev/raphael_panel.c`) | **Works**: the iOS slider changes the panel level |
+| 4c | Boot from `recovery`: `tools/raphael-move-recovery.py` (GPT: recovery 128 MiB at the end of darwin), image built on `twrp-original.img` (keeps recovery_dtbo) + `AVBTOOL=` footer | **Works** (power + volume up) |
+| 4d | Control Center contents, GPU pool (backboardd ~500 MB of 944), SSH shell (no `dash` in the v0.8.1 userland) | open |
 | 5 | Wi-Fi (WCN3990 + raphael board data), audio (TFA9874), cellular | to do |
 
 ## Hardware differences from RMX1931 handled so far
