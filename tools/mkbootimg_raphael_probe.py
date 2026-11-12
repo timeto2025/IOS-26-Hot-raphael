@@ -5,7 +5,9 @@ From the stock boot image (header v0/v1/v2, page 4096, gzip kernel with appended
 raphael's MIUI and custom ROM kernels ship) this keeps every header field the ABL looks at:
 load addresses, page size, header version, os_version, command line. It replaces the kernel
 with the shim's Image.gz followed by the stock appended DTBs, the ramdisk with the given one,
-and drops recovery_dtbo / dtb sections (the probe needs neither). Nothing here touches a phone.
+and keeps the stock recovery_dtbo section (header v1/v2): ABL refuses to start an image from the
+recovery partition without it, while `fastboot boot` does not care. The v2 dtb section is dropped.
+Nothing here touches a phone.
 """
 import argparse, hashlib, struct, sys, zlib
 
@@ -59,26 +61,39 @@ def main():
         die('shim kernel must be gzip (Image.gz)')
     new_kernel = shim + dtbs
     ramdisk = open(args.ramdisk, 'rb').read()
+    rdtbo = b''
+    if version >= 1:
+        rd_size, rd_off = struct.unpack_from('<IQ', stock, 1632)
+        if rd_size:
+            if rd_off == 0 or rd_off + rd_size > len(stock):
+                second = struct.unpack_from('<I', stock, 24)[0]
+                rd_off = page + align(ksize, page) + align(rsize, page) + align(second, page)
+            rdtbo = stock[rd_off:rd_off + rd_size]
+            if len(rdtbo) != rd_size:
+                die('stock recovery_dtbo is truncated')
+            print(f'stock recovery_dtbo: {rd_size} bytes kept')
 
     sha = hashlib.sha1()
     for blob in (new_kernel, ramdisk, b''):
         sha.update(blob); sha.update(struct.pack('<I', len(blob)))
     if version >= 1:
-        sha.update(struct.pack('<I', 0))          # recovery_dtbo
+        sha.update(rdtbo); sha.update(struct.pack('<I', len(rdtbo)))
     if version >= 2:
         sha.update(struct.pack('<I', 0))          # dtb
     header = bytearray(page)
     struct.pack_into(PAGE_FIELDS, header, 0, magic, len(new_kernel), kaddr, len(ramdisk), raddr, 0, saddr,
                      tags, page, version, osver, name, cmdline, sha.digest().ljust(32, b'\0'), extra)
+    rd_at = page + align(len(new_kernel), page) + align(len(ramdisk), page)
     if version >= 1:
         hsize = 1648 if version == 1 else 1660
-        struct.pack_into('<IQI', header, 1632, 0, 0, hsize)
+        struct.pack_into('<IQI', header, 1632, len(rdtbo), rd_at if rdtbo else 0, hsize)
     if version == 2:
         dtb_addr = struct.unpack_from('<Q', stock, 1652)[0] if len(stock) >= 1660 else 0
         struct.pack_into('<IQ', header, 1648, 0, dtb_addr)
 
     out = bytes(header) + new_kernel + bytes(align(len(new_kernel), page) - len(new_kernel)) \
-        + ramdisk + bytes(align(len(ramdisk), page) - len(ramdisk))
+        + ramdisk + bytes(align(len(ramdisk), page) - len(ramdisk)) \
+        + rdtbo + bytes(align(len(rdtbo), page) - len(rdtbo))
     open(args.output, 'wb').write(out)
     print(f'wrote {args.output}: {len(out)} bytes (shim {len(shim)} + stock DTBs {len(dtbs)})')
 
