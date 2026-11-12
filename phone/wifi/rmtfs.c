@@ -25,10 +25,10 @@
 #include "scm.h"
 
 #define RMTFS_DIR	"/var/local/fw/rmtfs"
-#define BUF_EFS_SIZE	0x200000u
+#define BUF_EFS_SIZE	0x300000u	/* raphael MPSS asks 3 MiB (RMTFS_ALLOC_BUFF 3145728); RMX1931 2 MiB */
 #define BUF_OEM_SIZE	0x100000u
 #define BUF_TOTAL_SIZE	(BUF_EFS_SIZE + BUF_OEM_SIZE)
-#define BUF_VERSION	5u
+#define BUF_VERSION	6u	/* 6: 3 MiB EFS window */
 #define SECTOR		512
 #define CNV_GOOD_CRC	0xe2f0u
 

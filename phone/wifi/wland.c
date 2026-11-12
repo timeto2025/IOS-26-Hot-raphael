@@ -809,7 +809,7 @@ static int up(unsigned secs)
 		printf("up: no WLAN SMMU stream: the radio will not start\n");
 	if (wlan_power() || smp2p_create())
 		return 1;
-	/* Pre-allocate GLINK rings, rmtfs 2 MB buffer + EFS fds, and TFTP dir BEFORE
+	/* Pre-allocate GLINK rings, rmtfs 3 MB buffer + EFS fds, and TFTP dir BEFORE
 	 * PAS-booting MPSS so the modem never waits on HFS+/SMC after GLINK comes up. */
 	if (glink_prepare() || rmtfs_prepare())
 		return 1;
