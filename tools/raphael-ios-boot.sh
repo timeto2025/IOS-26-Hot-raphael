@@ -96,6 +96,16 @@ python3 "$ROOT/tools/mkpayload.py" "$KERNEL" "$WORK/raphael.adt" "$WORK/payload-
 "$ROOT/shim/build-raphael.sh" "$STOCK" "$OUT" "$WORK/payload-raphael-ios.bin"
 echo
 echo "Boot args: $CMDLINE"
+# AVBTOOL=path/to/avbtool.py: also write OUT-avb.img with an unsigned AVB hash footer for the
+# 128 MiB recovery partition (tools/raphael-move-recovery.py); flash that one to recovery.
+# Use images/twrp-original.img as STOCK_BOOT_IMG for recovery: its recovery_dtbo is kept.
+if [[ -n "${AVBTOOL:-}" ]]; then
+	AVB_OUT=${OUT%.img}-avb.img
+	cp "$OUT" "$AVB_OUT"
+	python3 "$AVBTOOL" add_hash_footer --image "$AVB_OUT" --partition_name recovery \
+		--partition_size "${RECOVERY_SIZE:-134217728}" --algorithm NONE
+	echo "recovery image with AVB footer: $AVB_OUT  ->  fastboot flash recovery $AVB_OUT"
+fi
 if [[ "${RECOVERY:-0}" == 1 ]]; then
 	size=$(stat -c%s "$OUT")
 	echo "recovery image: $size bytes (partition 67108864)"
