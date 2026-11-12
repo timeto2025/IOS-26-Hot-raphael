@@ -110,11 +110,11 @@ if [[ "${WLAND_START:-0}" == 1 ]]; then
 	}
 	overlay_args+=(--wland-autostart)
 fi
-# RMTFS_RESTORE=1 (default): the modem's EFS copies in darwin (/var/local/fw/rmtfs, which the modem
+# RMTFS_RESTORE=1 (off by default: +24 MB makes the image too big for ABL, it drops to fastboot): the modem's EFS copies in darwin (/var/local/fw/rmtfs, which the modem
 # writes back through rmtfs) are put back to the phone's own partitions (work/fw/rmtfs from
 # raphael-extract-fw.sh) with every new image: hard resets in the middle of an EFS write left them
 # half-written. RMTFS_RESTORE=0 keeps what the modem wrote.
-if [[ "${RMTFS_RESTORE:-1}" == 1 ]]; then
+if [[ "${RMTFS_RESTORE:-0}" == 1 ]]; then
 	n=0
 	for img in modemst1 modemst2 fsg fsc; do
 		if [[ -f "$ROOT/work/fw/rmtfs/$img.img" ]]; then
