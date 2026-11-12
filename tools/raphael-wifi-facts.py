@@ -17,20 +17,31 @@ import fdt  # noqa: E402
 
 
 def dtbs_of(img):
-    if img[:8] != b'ANDROID!':
-        sys.exit('not an Android boot image')
-    ksize = struct.unpack_from('<I', img, 8)[0]
-    page = struct.unpack_from('<I', img, 36)[0]
-    kernel = img[page:page + ksize]
-    d = zlib.decompressobj(31)
-    d.decompress(kernel)
-    rest = d.unused_data
-    out = []
-    while len(rest) >= 8 and rest[:4] == b'\xd0\x0d\xfe\xed':
-        size = struct.unpack_from('>I', rest, 4)[0]
-        out.append(rest[:size])
-        rest = rest[size:]
-    return out
+    """Every valid FDT in the image: appended to a gzip kernel, to a raw/LZ4 kernel or in a dtb section."""
+    if img[:8] == b'ANDROID!':
+        ksize, page = struct.unpack_from('<I', img, 8)[0], struct.unpack_from('<I', img, 36)[0]
+        kernel = img[page:page + ksize]
+        if kernel[:2] == b'\x1f\x8b':
+            d = zlib.decompressobj(31)
+            d.decompress(kernel)
+            img = d.unused_data + img
+    out, pos = [], 0
+    while True:
+        at = img.find(b'\xd0\x0d\xfe\xed', pos)
+        if at < 0:
+            return out
+        pos = at + 4
+        if at + 40 > len(img):
+            continue
+        size, off_struct, off_strings, _, version = struct.unpack_from('>5I', img, at + 4)
+        if 16 <= version <= 17 and 256 <= size <= len(img) - at and off_struct < size and off_strings < size:
+            blob = img[at:at + size]
+            try:
+                fdt.parse(blob)
+            except Exception:
+                continue
+            out.append(blob)
+            pos = at + size
 
 
 def cells(v):
