@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include "link.h"
@@ -428,6 +429,25 @@ static int iovec(uint32_t caller, uint8_t dir, const uint8_t *v, uint16_t len)
 	int fd = fds[idx];
 	if (fd < 0)
 		return -1;
+	/*
+	 * The modem's writes stay in RAM (a private copy of the partition image, made at its first write) unless
+	 * /var/local/rmtfs.persist exists: written back to darwin, a hard reset in the middle of one left
+	 * modemst1 half-written and Wi-Fi joins failing until darwin was re-synced (raphael, 2026-11-13).
+	 * Android keeps them on flash, but the modem rebuilds what it needs from the read-only copies each boot.
+	 */
+	static int persist = -1;
+	static uint8_t *ram[sizeof(fds) / sizeof(fds[0])];
+	static size_t ram_len[sizeof(fds) / sizeof(fds[0])];
+	if (persist < 0)
+		persist = access("/var/local/rmtfs.persist", F_OK) == 0 || access("/private/var/local/rmtfs.persist", F_OK) == 0;
+	if (dir && !persist && !ram[idx] && !eff_ro[idx]) {
+		struct stat st;
+		if (fstat(fd, &st) == 0 && st.st_size > 0 && (ram[idx] = malloc((size_t)st.st_size)) != NULL) {
+			ssize_t r = pread(fd, ram[idx], (size_t)st.st_size, 0);
+			ram_len[idx] = r > 0 ? (size_t)r : 0;
+			printf("rmtfs: %s: the modem's writes stay in RAM (%zu bytes copied)\n", parts[idx].file, ram_len[idx]);
+		}
+	}
 	unsigned hdr = (len % 12 == 1) ? 1 : (len % 12 == 2) ? 2 : 4;
 	if (len < hdr)
 		return -1;
@@ -445,7 +465,14 @@ static int iovec(uint32_t caller, uint8_t dir, const uint8_t *v, uint16_t len)
 			return -1;
 		}
 		if (dir == 0) {
-			ssize_t r = pread(fd, tmp, bytes, (off_t)off);
+			ssize_t r;
+			if (ram[idx]) {
+				r = off < ram_len[idx] ? (ssize_t)(ram_len[idx] - off < bytes ? ram_len[idx] - off : bytes) : 0;
+				if (r > 0)
+					memcpy(tmp, ram[idx] + off, (size_t)r);
+			} else {
+				r = pread(fd, tmp, bytes, (off_t)off);
+			}
 			if (r < (ssize_t)bytes)
 				memset(tmp + (r > 0 ? r : 0), 0, bytes - (r > 0 ? r : 0));
 			pm_wr(pa, tmp, bytes);
@@ -458,12 +485,17 @@ static int iovec(uint32_t caller, uint8_t dir, const uint8_t *v, uint16_t len)
 			continue;
 		} else {
 			pm_rd(pa, tmp, bytes);
-			if (pwrite(fd, tmp, bytes, (off_t)off) != (ssize_t)bytes)
+			if (ram[idx]) {
+				if (off + bytes > ram_len[idx])
+					return -1;
+				memcpy(ram[idx] + off, tmp, bytes);
+			} else if (pwrite(fd, tmp, bytes, (off_t)off) != (ssize_t)bytes) {
 				return -1;
+			}
 		}
 		printf("rmtfs: %s %s sectors %u+%u\n", dir ? "write" : "read", parts[idx].file, e[0], e[2]);
 	}
-	if (dir && !eff_ro[idx])
+	if (dir && !eff_ro[idx] && !ram[idx])
 		fsync(fd);
 	return 0;
 }

@@ -1513,6 +1513,20 @@ static uint8_t *w_mgmt_hdr(uint8_t *f, uint8_t fc)
 	return f + 24;
 }
 
+/*
+ * A deauthentication from us before the first authentication: the AP may still hold the association of an
+ * earlier boot of this phone (the same MAC, no deauth sent: a reset, a crash, a hard power-off). Samsung's
+ * hotspot then never answered our authentication (join: failed in state 2) until it was restarted with a new
+ * BSSID. Reason 3: deauthenticated because the sending station is leaving.
+ */
+static int w_send_deauth(void)
+{
+	uint8_t f[26], *b = w_mgmt_hdr(f, FC_DEAUTH);
+	b[0] = 3;
+	b[1] = 0;
+	return w_mgmt_tx(f, sizeof(f));
+}
+
 static int w_send_auth(void)
 {
 	uint8_t f[30], *b = w_mgmt_hdr(f, FC_AUTH);
@@ -1898,6 +1912,7 @@ static void sta_poll(void)
 			s_state = S_AUTH;
 			s_tries = 1;
 			w_peer(CMD_PEER_CREATE, TAG_PEER_CREATE, 1);
+			w_send_deauth();		/* clear what the AP may remember of an earlier boot */
 			w_send_auth();
 			s_deadline = now + 400;
 		} else if (now > s_deadline) {
