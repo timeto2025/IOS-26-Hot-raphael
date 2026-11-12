@@ -13,7 +13,7 @@ Status: iOS 26 boots to SpringBoard from `darwin`; the iOS boot image can live i
 | 4b | Real AMOLED brightness by DCS 0x51 (0155, `bsd/dev/raphael_panel.c`) | **Works**: the iOS slider changes the panel level |
 | 4c | Boot from `recovery`: `tools/raphael-move-recovery.py` (GPT: recovery 128 MiB at the end of darwin), image built on `twrp-original.img` (keeps recovery_dtbo) + `AVBTOOL=` footer | **Works** (power + volume up) |
 | 4d | Control Center contents, GPU pool (backboardd ~500 MB of 944), SSH shell (no `dash` in the v0.8.1 userland) | open |
-| 5 | Wi-Fi (WCN3990 + raphael board data), audio (TFA9874), cellular | to do |
+| 5 | Wi-Fi: WCN3990 through the modem (wland), raphael carve-outs `wlanmpss=0x8e000000:0x9600000 wlanmsa=0x8bc00000:0x180000`, own firmware/NV staged by `tools/raphael-extract-fw.sh` + `tools/raphael-stage-fw.sh`, 3 MiB rmtfs EFS window; build with `WIFI=1 EXTRA_USERLAND=raphael-tools.tar.gz` | **Works** |
 
 ## Hardware differences from RMX1931 handled so far
 
