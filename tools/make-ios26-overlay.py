@@ -490,6 +490,8 @@ def main():
     ap.add_argument('--wland-wrapper', help='optional wrapper path for org.iosonpixel.wland ProgramArguments[0]')
     ap.add_argument('--selftest-bin', help='optional compiled arm64 self-test Mach-O for guarded test boots')
     ap.add_argument('--selftest-script', help='optional bring-up self-test shell script for guarded test boots')
+    ap.add_argument('--register-missing-hot-daemons', action='store_true',
+                    help='fresh root (raphael): register absent dropbear/wland jobs; wland stays idle')
     ap.add_argument('--extra', action='append', default=[],
                     help='extra file SRC:DST[:OCTAL_MODE] to include in the overlay (repeatable)')
     args = ap.parse_args()
@@ -620,6 +622,31 @@ def main():
         bb_env = dict(jobs[bb_key].get('EnvironmentVariables') or {})
         bb_env['CA_DISABLE_FRAMEBUFFER_COMPRESSION'] = '1'
         jobs[bb_key]['EnvironmentVariables'] = bb_env
+
+    # A root built fresh by build-rootfs has neither job (RMX1931 roots got them from
+    # earlier installs). raphael has no Wi-Fi driver yet: wland is registered but never
+    # started; dropbear runs only if the userland ships it.
+    if args.register_missing_hot_daemons:
+        path = 'PATH'
+        env = {path: '/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'}
+        db_key = '/System/Library/LaunchDaemons/org.iosonpixel.dropbear.plist'
+        if db_key not in jobs:
+            has_db = bool(args.userland_dir) and os.path.isfile(
+                os.path.join(args.userland_dir, 'bin', 'dropbearmulti'))
+            jobs[db_key] = {
+                'Label': 'org.iosonpixel.dropbear', 'EnvironmentVariables': env,
+                'ProgramArguments': ['/var/local/bin/dropbearmulti', 'dropbear', '-F', '-R', '-p', '22'],
+                'RunAtLoad': has_db, 'KeepAlive': has_db, 'UserName': 'root',
+                'StandardErrorPath': '/var/local/dropbear.log',
+            }
+        wl_key = '/System/Library/LaunchDaemons/org.iosonpixel.wland.plist'
+        if wl_key not in jobs:
+            jobs[wl_key] = {
+                'Label': 'org.iosonpixel.wland', 'EnvironmentVariables': env,
+                'ProgramArguments': ['/var/local/bin/wland', 'auto'],
+                'RunAtLoad': False, 'KeepAlive': False, 'UserName': 'root',
+                'StandardErrorPath': '/var/local/wland.log', 'StandardOutPath': '/var/local/wland.log',
+            }
 
     # Dropbear v2024.86 is built without syslog (-E is invalid; stderr is default).
     db_key = '/System/Library/LaunchDaemons/org.iosonpixel.dropbear.plist'

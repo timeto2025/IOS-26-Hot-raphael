@@ -38,7 +38,7 @@ CMDLINE+=" sweetgpu=0 sweetusb=0 flamereboot=0 sweetrtcoff=$(date +%s)"
 python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael
 
 overlay_args=(-o "$WORK/ios26-overlay-raphael.tar" --root-img "$ROOTIMG"
-	--userland-dir "$WORK/userland" --timezone "${TZ:-Europe/Moscow}")
+	--userland-dir "$WORK/userland" --timezone "${TZ:-Europe/Moscow}" --register-missing-hot-daemons)
 if [[ -d "$WORK/userland/Extensions/HotMetal2.bundle" ]]; then
 	overlay_args+=(--hotmetal2 "$WORK/userland/Extensions/HotMetal2.bundle")
 fi
