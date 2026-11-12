@@ -475,6 +475,8 @@ def main():
                     help='optional path to HotMetal2.bundle to stage under /System/Library/Extensions')
     ap.add_argument('--userland-dir', help='optional extracted userland dir (Applications/, HAL/, bin/, lib/)')
     ap.add_argument('--dsc-stubs-dir', help='optional dir of de-PACd dyld_shared_cache_arm64e.* stub subcaches')
+    ap.add_argument('--strip-job', action='append', metavar='LABEL',
+                    help='remove the LaunchDaemon with this Label (repeatable)')
     ap.add_argument('--mtl2-clients',
                     default='*\n-chronod\n-cameracaptured\n-WidgetRenderer_Default\n-PosterBoard',
                     help='/private/var/local/mtl2-clients content')
@@ -618,6 +620,20 @@ def main():
     renamed, removed = tweaks.clean_launchd_plist(plist)
 
     jobs = plist['LaunchDaemons']
+    # --strip-job LABEL (repeatable): daemons this phone has no hardware for and that launchd only
+    # restarts every 10 s (raphael: bluetoothd without a Bluetooth driver, fairplayd.H2 and seputil
+    # without a SEP). Their MachServices then fail at once instead of every 10 s.
+    for label in args.strip_job or []:
+        hits = [k for k, j in jobs.items() if isinstance(j, dict) and
+                (j.get('Label') == label or os.path.basename(k) == label + '.plist' or
+                 os.path.basename(str(j.get('Program') or (j.get('ProgramArguments') or [''])[0])) ==
+                 label.rsplit('.', 1)[-1])]
+        for k in hits:
+            print(f"launchd: {label} stripped ({k}, Label {jobs[k].get('Label')})")
+            del jobs[k]
+            removed.append(k)
+        if not hits:
+            print(f'launchd: warning: no job {label} to strip')
     # Ensure backboardd never selects a 10-bit b3a8 / compressed swapchain on Boot #1
     # before SweetMetal2.bundle loads (+2.6 s after IOMFB open).
     bb_key = '/System/Library/LaunchDaemons/com.apple.backboardd.plist'

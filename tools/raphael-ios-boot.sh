@@ -110,6 +110,9 @@ if [[ "${WLAND_START:-0}" == 1 ]]; then
 	}
 	overlay_args+=(--wland-autostart)
 fi
+# Daemons that only crash-loop on raphael (no Bluetooth driver yet, no SEP): STRIP_JOBS="" keeps them all.
+STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}
+for j in $STRIP_JOBS; do overlay_args+=(--strip-job "$j"); done
 # MTL2_CLIENTS='* -chronod ...' (spaces or newlines): which processes get HotMetal2 (/var/local/mtl2-clients);
 # default as upstream: everyone but chronod, cameracaptured, WidgetRenderer_Default and PosterBoard.
 if [[ -n "${MTL2_CLIENTS:-}" ]]; then
