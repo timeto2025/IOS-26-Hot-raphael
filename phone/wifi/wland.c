@@ -860,9 +860,11 @@ static int auto_up(void)
 		fputs(now, f);
 		fclose(f);
 	}
-	rename(WLAND_LOG, WLAND_LOG ".prev");
-	if (freopen(WLAND_LOG, "a", stdout))
-		dup2(fileno(stdout), 2);
+	if (!strstr(args, "wlandklog=1")) {	/* wlandklog=1: stdout already goes to the kernel console */
+		rename(WLAND_LOG, WLAND_LOG ".prev");
+		if (freopen(WLAND_LOG, "a", stdout))
+			dup2(fileno(stdout), 2);
+	}
 	setvbuf(stdout, NULL, _IONBF, 0);
 	printf("wland auto: boot %ld, memory limit 2048 MB -> %d\n", (long)bt.tv_sec, mrc);
 	return up(0);
