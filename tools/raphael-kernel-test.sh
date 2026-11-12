@@ -19,7 +19,9 @@ mkdir -p "$WORK"
 
 # Console on the panel, all 8 cores, no GPU/USB/Wi-Fi/log writer yet: the fewest moving parts.
 # raphtouchlog=1: the GT9886 driver (patch 0153) prints every touch frame on the console.
-CMDLINE="debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress cs_integrity_skip=1 wdt=-1 sweetgpu=0 sweetusb=0 sweetlog=0 raphtouchlog=1"
+# sweetprobe=1 ufsroot=darwin: start the UFS/keys/touch drivers without mounting a root;
+# the darwin partition is opened read-only (no ufsrw), Android userdata is not opened.
+CMDLINE="debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress cs_integrity_skip=1 wdt=-1 sweetgpu=0 sweetusb=0 sweetlog=0 raphtouchlog=1 sweetprobe=1 ufsroot=darwin"
 
 python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael
 python3 "$ROOT/tools/mkpayload.py" "$KERNEL" "$WORK/raphael.adt" "$WORK/payload-raphael.bin" --cmdline "$CMDLINE"
