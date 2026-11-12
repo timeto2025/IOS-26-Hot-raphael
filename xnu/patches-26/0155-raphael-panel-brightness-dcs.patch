@@ -1,0 +1,279 @@
+From: raphael port <noreply@example.invalid>
+Subject: [PATCH] raphael: real AMOLED brightness by DCS 0x51 (original driver)
+
+New bsd/dev/raphael_panel.c: sends DCS commands to the Samsung EA8076 panel through
+the DSI controller's TPG command FIFO (embedded mode, no DMA buffer, no SMMU). The
+host is probed with DCS 0x29 on DSI0 then DSI1; the iOS brightness slider
+(AppleARMBacklight::applyNitsQ16) then sets the real 11-bit level with DCS 0x51 and
+drops the software dimming. raphpanel=0 keeps software dimming only; raphbright=N
+sets a start level. SweetFramebuffer.cpp now includes board_config.h with the
+SWEET_BOARD_RAPHAEL guard.
+---
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 8dd16d2..6ccd217 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -110,6 +110,7 @@ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_fts.c			standard
+ bsd/dev/rmx1931_touch.c			standard
+ bsd/dev/raphael_touch.c			standard
++bsd/dev/raphael_panel.c			standard
+ bsd/dev/rmx1931_battery.c		standard
+ bsd/dev/rmx1931_audio.c			standard
+ bsd/dev/rmx1931_torch.c			standard
+diff --git a/bsd/dev/raphael_panel.c b/bsd/dev/raphael_panel.c
+new file mode 100644
+index 0000000..ff4b9aa
+--- /dev/null
++++ b/bsd/dev/raphael_panel.c
+@@ -0,0 +1,209 @@
++/*
++ * Redmi K20 Pro (raphael): real panel brightness for IOS-26-Hot.
++ *
++ * The panel is a Samsung EA8076 AMOLED in DSI command mode, left running by ABL. It has no
++ * backlight: brightness is the DCS command 0x51 with a big-endian 11-bit level (0..2047, the
++ * panel's maximum level). Commands are sent the way Qualcomm's display driver does when it has
++ * no DMA buffer: the DSI controller's test-pattern-generator FIFO in embedded mode, so no
++ * memory or SMMU mapping is involved. Register offsets of the DSI 6G controller:
++ *   0x03c COMMAND_MODE_DMA_CTRL  bit 28 embedded mode, bit 26 low-power mode,
++ *                                bits 31/30/29/24 broadcast/master/WC select/packet type (cleared)
++ *   0x04c DMA_CMD_LENGTH         bytes queued in the FIFO
++ *   0x090 CMD_MODE_DMA_SW_TRIGGER
++ *   0x110 INT_CTRL               bit 0 = command DMA done (write 1 to clear)
++ *   0x15c TEST_PATTERN_GEN_CTRL  bit 1 TPG enable, bit 2 command FIFO mode, bits 17:16 = 3 custom pattern
++ *   0x17c TPG_CMD_DMA_INIT_VAL   FIFO write port
++ *   0x1ec TPG_DMA_FIFO_RESET
++ * Embedded packet: one header dword [data0/wc_lo, data1/wc_hi, data type, flags] (flags bit 7 =
++ * last command, bit 6 = long packet with payload) followed by the payload padded with 0xff,
++ * and the FIFO is filled to an even number of dwords. Controllers: DSI0 0x0ae94000,
++ * DSI1 0x0ae96000; the one that completes a harmless DCS 0x29 (display on) is used.
++ *
++ * Boot-args: raphpanel=0 keeps the old software dimming only; raphbright=N (1..2047) sets the
++ * level once at start. Called from AppleARMBacklight (SweetFramebuffer.cpp) for the iOS slider.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/locks.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
++#if SWEET_BOARD_RAPHAEL
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++bool raphael_panel_ready(void);
++bool raphael_panel_set_level(uint32_t level);
++
++#define RP_DSI0_PA          0x0ae94000u
++#define RP_DSI1_PA          0x0ae96000u
++#define RP_DSI_SIZE         0x400u
++#define RP_DMA_CTRL         0x03cu
++#define RP_DMA_LEN          0x04cu
++#define RP_DMA_TRIGGER      0x090u
++#define RP_INT_CTRL         0x110u
++#define RP_TPG_CTRL         0x15cu
++#define RP_TPG_FIFO         0x17cu
++#define RP_TPG_RESET        0x1ecu
++#define RP_LEVEL_MAX        2047u
++#define RP_LEVEL_MIN        4u
++
++#define RP_DT_DCS_SHORT0    0x05u   /* DCS short write, no parameter */
++#define RP_DT_DCS_LONG      0x39u   /* DCS long write */
++#define RP_FLAG_LAST        0x80u
++#define RP_FLAG_LONG        0x40u
++
++static LCK_GRP_DECLARE(rp_grp, "raphael_panel");
++static LCK_MTX_DECLARE(rp_lock, &rp_grp);
++static vm_offset_t rp_dsi;
++static int rp_state;            /* 0 not probed, 1 ready, -1 unavailable */
++static uint32_t rp_level;
++
++static inline uint32_t
++rp_rd(vm_offset_t b, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(b + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++rp_wr(vm_offset_t b, uint32_t off, uint32_t v)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(b + off) = v;
++	__asm__ volatile ("dsb osh" ::: "memory");
++}
++
++/* Queue one embedded packet (n dwords) in the TPG FIFO, trigger it, wait for DMA done. */
++static bool
++rp_send(vm_offset_t dsi, const uint32_t *pkt, unsigned n)
++{
++	rp_wr(dsi, RP_INT_CTRL, rp_rd(dsi, RP_INT_CTRL) | 1u);      /* stale "done" off */
++	rp_wr(dsi, RP_TPG_CTRL, 0);
++	rp_wr(dsi, RP_TPG_RESET, 1);
++	delay(1);
++	rp_wr(dsi, RP_TPG_RESET, 0);
++	rp_wr(dsi, RP_TPG_CTRL, (3u << 16) | (1u << 2) | (1u << 1));
++	unsigned i;
++	for (i = 0; i < n; ++i) {
++		rp_wr(dsi, RP_TPG_FIFO, pkt[i]);
++	}
++	if (i & 1u) {
++		rp_wr(dsi, RP_TPG_FIFO, 0);
++	}
++	uint32_t ctrl = rp_rd(dsi, RP_DMA_CTRL);
++	ctrl &= ~((1u << 31) | (1u << 30) | (1u << 29) | (1u << 24));
++	ctrl |= (1u << 28) | (1u << 26);
++	rp_wr(dsi, RP_DMA_CTRL, ctrl);
++	rp_wr(dsi, RP_DMA_LEN, 4u * n);
++	rp_wr(dsi, RP_DMA_TRIGGER, 1);
++	bool done = false;
++	for (unsigned t = 0; t < 5000u; ++t) {                     /* up to ~50 ms */
++		if (rp_rd(dsi, RP_INT_CTRL) & 1u) {
++			done = true;
++			break;
++		}
++		delay(10);
++	}
++	rp_wr(dsi, RP_INT_CTRL, rp_rd(dsi, RP_INT_CTRL) | 1u);
++	rp_wr(dsi, RP_TPG_CTRL, 0);
++	return done;
++}
++
++static bool
++rp_dcs_short(vm_offset_t dsi, uint8_t cmd)
++{
++	const uint32_t pkt[1] = {
++		(uint32_t)cmd | ((uint32_t)RP_DT_DCS_SHORT0 << 16) | ((uint32_t)RP_FLAG_LAST << 24),
++	};
++	return rp_send(dsi, pkt, 1);
++}
++
++static bool
++rp_dcs_brightness(vm_offset_t dsi, uint32_t level)
++{
++	/* payload 0x51, level high byte, level low byte, pad: word count 3 */
++	const uint32_t pkt[2] = {
++		3u | ((uint32_t)RP_DT_DCS_LONG << 16) | ((uint32_t)(RP_FLAG_LAST | RP_FLAG_LONG) << 24),
++		0x51u | (((level >> 8) & 0xffu) << 8) | ((level & 0xffu) << 16) | 0xff000000u,
++	};
++	return rp_send(dsi, pkt, 2);
++}
++
++static void
++rp_probe_locked(void)
++{
++	int on = 1;
++	(void)PE_parse_boot_argn("raphpanel", &on, sizeof(on));
++	if (!on) {
++		rp_state = -1;
++		printf("RAPH PANEL: disabled (raphpanel=0), software dimming only\n");
++		return;
++	}
++	const uint32_t pas[2] = { RP_DSI0_PA, RP_DSI1_PA };
++	for (unsigned i = 0; i < 2u; ++i) {
++		vm_offset_t b = ml_io_map(pas[i], RP_DSI_SIZE);
++		if (!b) {
++			continue;
++		}
++		printf("RAPH PANEL: DSI%u ctrl=%#x dma=%#x int=%#x\n", i, rp_rd(b, 0x4), rp_rd(b, RP_DMA_CTRL),
++		    rp_rd(b, RP_INT_CTRL));
++		if (rp_dcs_short(b, 0x29)) {
++			rp_dsi = b;
++			rp_state = 1;
++			printf("RAPH PANEL: DSI%u answers DCS; panel brightness by DCS 0x51\n", i);
++			return;
++		}
++		printf("RAPH PANEL: DSI%u: command DMA did not complete\n", i);
++	}
++	rp_state = -1;
++	printf("RAPH PANEL: no DSI host answered; software dimming only\n");
++}
++
++bool
++raphael_panel_ready(void)
++{
++	lck_mtx_lock(&rp_lock);
++	if (rp_state == 0) {
++		rp_probe_locked();
++		uint32_t start = 0;
++		if (rp_state == 1 && PE_parse_boot_argn("raphbright", &start, sizeof(start)) && start) {
++			start = start > RP_LEVEL_MAX ? RP_LEVEL_MAX : start;
++			if (rp_dcs_brightness(rp_dsi, start)) {
++				rp_level = start;
++				printf("RAPH PANEL: start level %u\n", start);
++			}
++		}
++	}
++	bool ok = rp_state == 1;
++	lck_mtx_unlock(&rp_lock);
++	return ok;
++}
++
++bool
++raphael_panel_set_level(uint32_t level)
++{
++	if (!raphael_panel_ready()) {
++		return false;
++	}
++	level = level < RP_LEVEL_MIN ? RP_LEVEL_MIN : (level > RP_LEVEL_MAX ? RP_LEVEL_MAX : level);
++	lck_mtx_lock(&rp_lock);
++	bool ok = true;
++	if (level != rp_level) {
++		ok = rp_dcs_brightness(rp_dsi, level);
++		if (ok) {
++			rp_level = level;
++		} else {
++			rp_state = -1;
++			printf("RAPH PANEL: brightness DCS failed; back to software dimming\n");
++		}
++	}
++	lck_mtx_unlock(&rp_lock);
++	return ok;
++}
++#endif /* SWEET_BOARD_RAPHAEL */
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 615e43d..389874a 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,6 +37,10 @@
+ #include "SweetSurface.h"
+ #include "SweetDisplayMask.h"
+ #include <sweet_diag.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ 
+@@ -51,6 +55,9 @@ int sweet_gpu_present(int slot, uintptr_t kva, uint32_t offset, uint32_t w, uint
+ void sweet_gpu_panel_stride(uint32_t stride);
+ extern int sweet_display_fit_x, sweet_display_fit_y, sweet_display_fit_w, sweet_display_fit_h;
+ extern volatile uint32_t sweet_backlight_alpha;
++#if SWEET_BOARD_RAPHAEL
++extern "C" bool raphael_panel_set_level(uint32_t level);
++#endif
+ }
+ #define SWEET_FB_GPU_ROWBYTES           4352    /* the 2D engine writes 64-byte multiples */
+ 
+@@ -1082,6 +1089,12 @@ AppleARMBacklight::applyNitsQ16(uint32_t rawQ16)
+ 			fRawLevel = 2047;
+ 		}
+ 	}
++#if SWEET_BOARD_RAPHAEL
++	/* raphael: real AMOLED level by DCS 0x51 (bsd/dev/raphael_panel.c); then no software dim. */
++	if (rawQ16 != 0 && raphael_panel_set_level(fRawLevel)) {
++		alpha = 0;
++	}
++#endif
+ 	uint32_t prev = sweet_backlight_alpha;
+ 	sweet_backlight_alpha = alpha;
+ 	setProperty("brightness-nits", (uint64_t)rawQ16, 32);
+-- 
+2.43.0
+
