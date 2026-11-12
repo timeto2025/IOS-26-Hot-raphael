@@ -1,0 +1,75 @@
+From: raphael port <noreply@example.invalid>
+Subject: [PATCH] raphael: GT9886 touch power-cycles and retries at start
+
+A warm restart left the GT9886 answering with stale data (doze status read back
+0xaa, version block sum 0x8a), and the driver stopped after one try. Now each
+attempt cuts VDD/AVDD (bus pins idle) before the reset pulse, waits longer for
+the firmware, and up to 4 attempts are made.
+---
+diff --git a/bsd/dev/raphael_touch.c b/bsd/dev/raphael_touch.c
+index 7446c0f..c313be1 100644
+--- a/bsd/dev/raphael_touch.c
++++ b/bsd/dev/raphael_touch.c
+@@ -539,15 +539,24 @@ rt_se_init(void)
+ 	return true;
+ }
+ 
+-/* Rails on with the IC held in reset, then a clean reset pulse. */
++/*
++ * Full power cycle: reset low, rails off long enough to discharge, rails on with the IC held in
++ * reset, then a clean reset pulse. A warm restart can leave the IC answering with stale data
++ * (doze status echoing 0xaa, version block not summing to zero), so every attempt starts cold.
++ */
+ static void
+-rt_power_up(void)
++rt_power_up(unsigned attempt)
+ {
+-	printf("RAPH TOUCH: pins before rst=%#x irq=%#x vdd=%#x avdd=%#x\n",
++	printf("RAPH TOUCH: power cycle %u: pins before rst=%#x irq=%#x vdd=%#x avdd=%#x\n", attempt,
+ 	    rt_rd(rt.gpio, GPIO_IO(RT_PIN_RST)), rt_rd(rt.gpio, GPIO_IO(RT_PIN_IRQ)),
+ 	    rt_rd(rt.gpio, GPIO_IO(RT_PIN_VDD)), rt_rd(rt.gpio, GPIO_IO(RT_PIN_AVDD)));
+ 	rt_gpio(RT_PIN_IRQ, 0, 3, 7, false, false);       /* input, pull-up */
+ 	rt_gpio(RT_PIN_RST, 0, 3, 7, true, false);        /* hold in reset */
++	rt_gpio(RT_PIN_SDA, 0, 1, 0, false, false);       /* bus pins idle (pull-down) while unpowered */
++	rt_gpio(RT_PIN_SCL, 0, 1, 0, false, false);
++	rt_gpio(RT_PIN_VDD, 0, 0, 0, true, false);
++	rt_gpio(RT_PIN_AVDD, 0, 0, 0, true, false);
++	rt_wait(150u + 100u * attempt);                   /* rails discharge */
+ 	rt_gpio(RT_PIN_VDD, 0, 0, 0, true, true);
+ 	rt_gpio(RT_PIN_AVDD, 0, 0, 0, true, true);
+ 	rt_wait(300);                                     /* DT power-on delay */
+@@ -555,7 +564,7 @@ rt_power_up(void)
+ 	rt_gpio(RT_PIN_SCL, RT_PIN_MUX, 0, 0, false, false);
+ 	rt_wait(2);
+ 	rt_gpio(RT_PIN_RST, 0, 3, 7, true, true);         /* release reset */
+-	rt_wait(300);                                     /* firmware start-up */
++	rt_wait(400u + 200u * attempt);                   /* firmware start-up from flash */
+ }
+ 
+ static void
+@@ -578,11 +587,17 @@ rt_thread(void *arg, wait_result_t result)
+ 	if (!rt_clocks() || !rt_se_init()) {
+ 		goto out;
+ 	}
+-	rt_power_up();
+-	rt.probing = true;
+-	int awake = gt_stay_awake();
+-	int ident = gt_identify();
+-	rt.probing = false;
++	int awake = 0, ident = ENODEV;
++	for (unsigned attempt = 0; attempt < 4u && !rt.dead && ident; ++attempt) {
++		rt_power_up(attempt);
++		rt.probing = (attempt == 0);
++		awake = gt_stay_awake();
++		ident = gt_identify();
++		rt.probing = false;
++		if (ident) {
++			printf("RAPH TOUCH: attempt %u failed (awake=%d identify=%d)\n", attempt, awake, ident);
++		}
++	}
+ 	if (rt.dead || ident) {
+ 		printf("RAPH TOUCH: no GT9886 at %#x (awake=%d identify=%d); stopping\n", GT_ADDR, awake, ident);
+ 		goto out;
+-- 
+2.43.0
+

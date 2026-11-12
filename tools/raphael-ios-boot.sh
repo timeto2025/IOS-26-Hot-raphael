@@ -68,7 +68,7 @@ if [[ -f "$SSHKEY" ]]; then
 else
 	echo "SSH: no key ($SSHKEY missing; create one with ssh-keygen -t ed25519)"
 fi
-if ! tar -tzf "$USERLAND" | grep -q 'bin/dropbearmulti$'; then
+if [[ ! -f "$WORK/userland/bin/dropbearmulti" ]]; then
 	echo "SSH: warning: the userland has no bin/dropbearmulti; dropbear will not run"
 fi
 python3 "$ROOT/tools/make-ios26-overlay.py" "${overlay_args[@]}"
