@@ -1,0 +1,152 @@
+From 64cc9bfa8deaa36606f9f8ef3ca11a306f532227 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Thu, 12 Nov 2026 22:55:27 +0300
+Subject: [PATCH] raphael: battery % from the PM8150B fuel gauge, flash LED on
+
+---
+ bsd/dev/rmx1931_battery.c | 100 ++++++++++++++++++++++++++++++++++++--
+ bsd/dev/rmx1931_torch.c   |   4 +-
+ 2 files changed, 98 insertions(+), 6 deletions(-)
+
+diff --git a/bsd/dev/rmx1931_battery.c b/bsd/dev/rmx1931_battery.c
+index e390f0f..fc66a1e 100644
+--- a/bsd/dev/rmx1931_battery.c
++++ b/bsd/dev/rmx1931_battery.c
+@@ -450,6 +450,87 @@ out:
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++#if SWEET_BOARD_RAPHAEL
++/*
++ * raphael (Redmi K20 Pro): no I2C gauge. Its dtbo puts the fuel gauge in the PM8150B (SID 2) itself,
++ * qcom,fg-gen4, with the charger (qcom,qpnp-smb5) and an SMB1390 charge pump. Read-only:
++ *   0x4009  FG BATT_SOC monotonic SOC, 0..255 (what Android's fg-gen4 reports as capacity)
++ *   0x1310  USBIN interrupt real-time status, 0x1006 charger status (as on RMX1931)
++ * Voltage, current and temperature live in the FG's SRAM (memif), not read here yet.
++ */
++#define FG_SID                  2u
++#define FG_BATT_SOC_BASE        0x4000u
++#define FG_MONOTONIC_SOC        (FG_BATT_SOC_BASE + 0x09u)
++
++static bool
++fg_poll_once(struct rmx1931_battery_state *st, uint8_t *raw_out)
++{
++	uint8_t raw = 0, usb_rt = 0, chg_stat = 0;
++	if (sweet_spmi_read(FG_SID, FG_MONOTONIC_SOC, &raw) != 0) {
++		return false;
++	}
++	*raw_out = raw;
++	unsigned soc = ((unsigned)raw * 100u + 127u) / 255u;
++	bool spmi_usb = sweet_spmi_read(2, 0x1310u, &usb_rt) == 0;
++	bool spmi_chg = sweet_spmi_read(2, 0x1006u, &chg_stat) == 0;
++	unsigned chg_state = spmi_chg ? (chg_stat & 7u) : 0u;
++	bool external = spmi_usb && ((usb_rt & 0x10u) != 0 || (usb_rt & 0x04u) != 0);
++	bool charging = external && spmi_chg && chg_state >= 1u && chg_state <= 4u;
++	bool full = external && !charging && ((spmi_chg && chg_state == 5u) || soc >= 100u);
++	if (full) {
++		soc = 100u;
++	}
++	bzero(st, sizeof(*st));
++	st->valid = true;
++	st->present = true;
++	st->external_connected = external;
++	st->charge_capable = external;
++	st->charging = charging;
++	st->full = full;
++	st->soc = soc;
++	st->voltage_mv = 3850u;         /* nominal: not measured yet (FG SRAM) */
++	st->pack_voltage_mv = 3850u;
++	st->current_ma = 0;
++	st->design_mah = 4000u;         /* raphael: 4000 mAh */
++	st->fcc_mah = 4000u;
++	st->rem_mah = (4000u * soc + 50u) / 100u;
++	st->temp_deci_c = 250;
++	return true;
++}
++
++static void
++fg_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	bq_wait_ms(1500);
++	(void)sweet_spmi_init();
++	unsigned logged = 0, errors = 0;
++	for (;;) {
++		struct rmx1931_battery_state st;
++		uint8_t raw = 0;
++		if (fg_poll_once(&st, &raw)) {
++			errors = 0;
++			bq_last_state = st;
++			sys_bat_soc = (int)st.soc;
++			sys_bat_charging = st.charging ? 1 : 0;
++			sys_bat_external = st.external_connected ? 1 : 0;
++			sys_bat_fcc_mah = (int)st.fcc_mah;
++			SweetBatteryReport(&st);
++			if (logged < 4 || (logged % 20u) == 0) {
++				printf("RAPH BATTERY: soc=%u%% (fg raw %u/255) ext=%d chg=%d full=%d\n",
++				    st.soc, raw, st.external_connected, st.charging, st.full);
++			}
++			logged++;
++		} else {
++			bq_total_errors++;
++			if ((errors++ % 10u) == 0) {
++				printf("RAPH BATTERY: PM8150B FG read error (%u)\n", errors);
++			}
++		}
++		bq_wait_ms(logged <= 4 ? 5000 : 15000);
++	}
++}
++#endif /* SWEET_BOARD_RAPHAEL */
++
+ void
+ rmx1931_battery_init(void)
+ {
+@@ -460,15 +541,28 @@ rmx1931_battery_init(void)
+ 		return;
+ 	}
+ 	bq_started = true;
++	thread_continue_t fn = bq_thread;
+ #if SWEET_BOARD_RAPHAEL
+-	enabled = 0;	/* RMX1931 dual-cell I2C gauge; raphael uses the PMIC fuel gauge */
+-#endif
++	/* raphael: the PM8150B fuel gauge (raphbattery=0 turns it off); rmxbattery=1 would probe the RMX1931 gauge */
++	enabled = 0;
++	(void)PE_parse_boot_argn("rmxbattery", &enabled, sizeof(enabled));
++	if (!enabled) {
++		enabled = 1;
++		(void)PE_parse_boot_argn("raphbattery", &enabled, sizeof(enabled));
++		if (!enabled) {
++			printf("RAPH BATTERY: disabled (raphbattery=0)\n");
++			return;
++		}
++		fn = fg_thread;
++	}
++#else
+ 	(void)PE_parse_boot_argn("rmxbattery", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		printf("RMX BATTERY: disabled (rmxbattery=0)\n");
+ 		return;
+ 	}
+-	if (kernel_thread_start(bq_thread, NULL, &thread) == KERN_SUCCESS) {
++#endif
++	if (kernel_thread_start(fn, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	} else {
+ 		printf("RMX BATTERY: kernel_thread_start failed\n");
+diff --git a/bsd/dev/rmx1931_torch.c b/bsd/dev/rmx1931_torch.c
+index f95f518..8f37579 100644
+--- a/bsd/dev/rmx1931_torch.c
++++ b/bsd/dev/rmx1931_torch.c
+@@ -441,9 +441,7 @@ rmx1931_torch_init(void)
+ 		return;
+ 	}
+ 	tr_started = true;
+-#if SWEET_BOARD_RAPHAEL
+-	mode = 0;	/* RMX1931 flash LED wiring */
+-#endif
++	/* raphael's dtbo has the same flash LED block (PM8150L SID 5, qcom,leds@d300, qpnp-flash-led-v2) */
+ 	(void)PE_parse_boot_argn("rmxtorch", &mode, sizeof(mode));
+ 	if (mode == 0) {
+ 		printf("RMX TORCH: disabled (rmxtorch=0)\n");
+-- 
+2.43.0
+
