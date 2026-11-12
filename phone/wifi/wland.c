@@ -384,8 +384,31 @@ static int qmp_send(const char *msg)
 /* ---- modem boot: TrustZone PAS (Linux qcom_q6v5_pas + qcom_mdt_loader) ---- */
 
 #define PAS_MODEM	4
-#define MPSS_PA		0x8dc00000ull	/* RMX1931 modem_region */
-#define MPSS_SIZE	0x0a000000ull	/* 0x8dc00000..0x97c00000 (160 MiB) */
+/* The modem carve-out (DT modem_region): RMX1931 0x8dc00000 + 160 MiB by default; another board passes
+ * its own with the boot-arg wlanmpss=0xPA:0xSIZE (raphael: from its device tree). */
+static unsigned long long MPSS_PA = 0x8dc00000ull, MPSS_SIZE = 0x0a000000ull;
+
+static void mpss_from_bootargs(void)
+{
+	char args[1024] = "";
+	size_t n = sizeof(args) - 1;
+	if (sysctlbyname("kern.bootargs", args, &n, NULL, 0) != 0)
+		return;
+	const char *p = strstr(args, "wlanmpss=");
+	if (!p)
+		return;
+	char *end = NULL;
+	unsigned long long pa = strtoull(p + 9, &end, 0), sz = 0;
+	if (end && *end == ':')
+		sz = strtoull(end + 1, NULL, 0);
+	if (pa && sz && !(pa & 0xfff) && !(sz & 0xfff)) {
+		MPSS_PA = pa;
+		MPSS_SIZE = sz;
+		printf("boot: modem region %llx+%llx (wlanmpss)\n", pa, sz);
+	} else {
+		fprintf(stderr, "boot: bad wlanmpss=, keeping %llx+%llx\n", MPSS_PA, MPSS_SIZE);
+	}
+}
 #define FW_DIR		"/var/local/fw/modem"
 #define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
 
@@ -419,6 +442,7 @@ struct phdr { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align; 
 
 static int boot_modem(void)
 {
+	mpss_from_bootargs();
 	/* 1. proxy votes as downstream (vdd_cx/vdd_mss >= 385): top levels until SMP2P handover */
 	int ncx = levels("cx.lvl", 0), nmss = levels("mss.lvl", 0);
 	uint64_t aux;

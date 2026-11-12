@@ -40,6 +40,9 @@ CMDLINE+=" cs_integrity_skip=1 fips_mode=0x44 unentitled_ios_sim_launch=1 igniti
 CMDLINE+=" wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1"
 CMDLINE+=" sweetfb_noconsole=1 flamereboot=0 sweetrtcoff=$(date +%s)"
 if [[ "${USB:-1}" == 0 ]]; then CMDLINE+=" sweetusb=0"; else CMDLINE+=" sweetusb=2 sweetusbframes=0"; fi
+# WLANMPSS=0xPA:0xSIZE (the modem_region from tools/raphael-wifi-facts.py): turn on the Wi-Fi bridge
+# (sweetwifid=1) and tell wland where this board's modem carve-out is. Firmware: /var/local/fw/modem.
+if [[ -n "${WLANMPSS:-}" ]]; then CMDLINE+=" sweetwifid=1 wlanmpss=$WLANMPSS"; fi
 gpu_args=()
 if [[ -n "${GPUFW:-}" ]]; then
 	for fw in a640_gmu.bin a630_sqe.fw a640_zap.mdt a640_zap.b02; do

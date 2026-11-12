@@ -1107,6 +1107,10 @@ def main():
                 if os.path.isfile(os.path.join(bin_dir, 'dropbearmulti')):
                     for link in ('dropbear', 'dbclient', 'dropbearkey', 'scp'):
                         add_ustar_symlink(tf, f'private/var/local/bin/{link}', 'dropbearmulti')
+                # iOS has no /bin/sh: root's login shell (and every `ssh host cmd`) needs one.
+                if os.path.isfile(os.path.join(bin_dir, 'dash')):
+                    add_ustar_symlink(tf, 'bin/sh', '/private/var/local/bin/dash')
+                    add_ustar_symlink(tf, 'private/var/local/bin/sh', 'dash')
                 for legacy_bin, hot_bin in (
                     ('sweetdiag', 'hotdiag'),
                     ('sweet-bootprep', 'hot-bootprep'),

@@ -57,7 +57,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: work/userland/stage
-          key: shell-ios-v1-${{ runner.os }}-${{ hashFiles('work/userland/bin/ios-cc') }}
+          key: shell-ios-v2-${{ runner.os }}-${{ hashFiles('work/userland/bin/ios-cc') }}
 
       - name: Setup Xcode and Homebrew tools
         run: |
@@ -169,9 +169,17 @@ jobs:
           # 1. dash (/bin/sh)
           (
             set -e
-            git clone --depth 1 --branch v0.5.12 https://git.kernel.org/pub/scm/utils/dash/dash.git work/userland/src/dash-0.5.12
-            cd work/userland/src/dash-0.5.12
-            ./autogen.sh
+            # Release tarball first (has ./configure, no autotools needed); else git + autogen.
+            if curl -sfL http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz | tar xzf - -C work/userland/src \
+                && [ -x work/userland/src/dash-0.5.12/configure ]; then
+              cd work/userland/src/dash-0.5.12
+            else
+              brew install autoconf automake >/dev/null
+              rm -rf work/userland/src/dash-0.5.12
+              git clone --depth 1 --branch v0.5.12 https://git.kernel.org/pub/scm/utils/dash/dash.git work/userland/src/dash-0.5.12
+              cd work/userland/src/dash-0.5.12
+              ./autogen.sh
+            fi
             CC="$CC_IOS" CC_FOR_BUILD=/usr/bin/clang ac_cv_func_strchrnul=no ac_cv_func_stat64=no ac_cv_func_open64=no \
               ./configure --host=aarch64-apple-darwin
             make -j4
@@ -229,6 +237,7 @@ jobs:
             cp toybox ../../stage/toybox
           ) || echo "WARN: toybox build failed"
           ls -la work/userland/stage
+          [ -x work/userland/stage/dash ] || echo "::warning::dash missing from the SSH shell tools"
 
       - name: Package userland bundle
         run: |
