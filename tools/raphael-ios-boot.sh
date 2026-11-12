@@ -80,9 +80,24 @@ fi
 overlay_args+=(--wallpaper "$WALLPAPER" --wallpaper-size 1125x2499)
 python3 "$ROOT/tools/make-ios26-overlay.py" "${overlay_args[@]}"
 
+# RECOVERY=1: no overlay in the payload, small enough for the 64 MiB recovery partition. The kernel
+# writes the overlay into darwin once (stamp /private/var/local/.overlay-stamp), so first boot the
+# full image with `fastboot boot`, then flash the RECOVERY=1 image.
+ov_args=(--overlay "$WORK/ios26-overlay-raphael.tar")
+if [[ "${RECOVERY:-0}" == 1 ]]; then
+	ov_args=()
+	[[ $# -ge 5 ]] || OUT=$ROOT/shim/out/raphael-ios-recovery.img
+fi
 python3 "$ROOT/tools/mkpayload.py" "$KERNEL" "$WORK/raphael.adt" "$WORK/payload-raphael-ios.bin" \
-	--overlay "$WORK/ios26-overlay-raphael.tar" --cmdline "$CMDLINE" "${gpu_args[@]}"
+	"${ov_args[@]}" --cmdline "$CMDLINE" "${gpu_args[@]}"
 "$ROOT/shim/build-raphael.sh" "$STOCK" "$OUT" "$WORK/payload-raphael-ios.bin"
 echo
 echo "Boot args: $CMDLINE"
-echo "Test with: fastboot boot $OUT   (do not flash)"
+if [[ "${RECOVERY:-0}" == 1 ]]; then
+	size=$(stat -c%s "$OUT")
+	echo "recovery image: $size bytes (partition 67108864)"
+	(( size <= 67108864 )) || { echo "error: too big for recovery" >&2; exit 1; }
+	echo "First boot the full image once (fastboot boot), then: fastboot flash recovery $OUT"
+else
+	echo "Test with: fastboot boot $OUT   (do not flash)"
+fi
