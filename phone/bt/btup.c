@@ -186,6 +186,41 @@ load(const char *path, size_t *len)
  * byte 14 of the file: 0 a vendor event and a Command Complete, 1 only the Command Complete, 2 only the vendor
  * event, 3 none). raphael's crbtfw21.tlv: none, so every segment just goes out. NVM files: both events.
  */
+/*
+ * NVM: TLV header (type 2, 24-bit length), then tags of { id 2, len 2, reserved 8, data[len] }. Tag 17 (HCI
+ * transport) holds the UART rate the controller switches to at HCI_Reset (data[2] on WCN3990/3998, as an
+ * enum index) and in-band sleep (data[0] bit 7). As Linux's btqca does: the rate is set to the one the host
+ * runs at and in-band sleep off (this host sends no wake bytes). The phone's file had the controller jump to
+ * another rate after the reset: only 0xff bytes came back.
+ */
+static uint8_t nvm_rate_idx;
+
+static void
+nvm_fixup(uint8_t *d, size_t len)
+{
+	if (len < 4 || (d[0] & 0xff) != 2) {
+		return;
+	}
+	size_t idx = 4;
+	while (idx + 12 <= len) {
+		unsigned id = d[idx] | d[idx + 1] << 8, tl = d[idx + 2] | d[idx + 3] << 8;
+		uint8_t *data = d + idx + 12;
+		if (idx + 12 + tl > len) {
+			break;
+		}
+		if (id == 17 && tl >= 3) {
+			printf("btup: NVM tag 17 (HCI): flags %#04x rate %u -> flags %#04x rate %u\n", data[0], data[2],
+			    data[0] & 0x7f, nvm_rate_idx);
+			data[0] &= 0x7f;
+			data[2] = nvm_rate_idx;
+		} else if (id == 2 && tl >= 6) {
+			printf("btup: NVM tag 2 (BD address): %02x:%02x:%02x:%02x:%02x:%02x\n", data[5], data[4], data[3],
+			    data[2], data[1], data[0]);
+		}
+		idx += 12 + tl;
+	}
+}
+
 static int
 download(const char *path, int is_patch)
 {
@@ -194,6 +229,9 @@ download(const char *path, int is_patch)
 	if (!d) {
 		printf("btup: %s: %s\n", path, strerror(errno));
 		return -1;
+	}
+	if (!is_patch) {
+		nvm_fixup(d, len);
 	}
 	int mode = is_patch && len > 14 ? d[14] & 3 : 0;
 	printf("btup: %s: %zu bytes, download mode %d (%s)\n", path, len, mode,
@@ -347,6 +385,7 @@ main(int argc, char **argv)
 		}
 		ioctl(fd, RBT_FLUSH);
 	}
+	nvm_rate_idx = ri > 0 ? rates[ri].idx : 0;
 	uint32_t on = 1;
 	ioctl(fd, RBT_SET_FLOW, &on);
 
