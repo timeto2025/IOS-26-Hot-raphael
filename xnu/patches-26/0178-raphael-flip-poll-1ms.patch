@@ -1,0 +1,90 @@
+From 96edffed1602ffe263043bb40bad39030f9f0cd7 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 18:23:18 +0300
+Subject: [PATCH] raphael: poll a waiting flip every 1 ms (the 60 Hz timer is
+ out of phase with TE: ~1/3 of frames were replaced before they reached the
+ panel)
+
+---
+ bsd/dev/sweet_gpu.c | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index bfb376a..104d075 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -22,6 +22,7 @@
+ #include <kern/thread.h>
+ #include <kern/clock.h>
+ #include <kern/sched_prim.h>
++#include <kern/thread_call.h>
+ #include <machine/machine_routines.h>
+ #include <arm/caches_internal.h>
+ #include <vm/pmap.h>
+@@ -518,6 +519,15 @@ static int flip_front, flip_pending = -1, flip_prev = -1;
+ static uint32_t flip_pending_fence;
+ static uint64_t flip_count, flip_skipped;
+ static vm_offset_t flip_cpu[3];
++/*
++ * The flip can only go out once the previous one latched at a TE, and the 60 Hz vsync timer is not in phase
++ * with the panel's TE: polled only there (and at the next present) a waiting frame often missed a TE and was
++ * replaced by the next present, so ~1/3 of the frames never reached the panel (judder). While a frame waits,
++ * poll every 1 ms instead.
++ */
++static thread_call_t flip_tc;
++static uint32_t flip_tc_tries;
++static void flip_tc_fire(thread_call_param_t p0, thread_call_param_t p1);
+ 
+ static void
+ flip_setup_locked(void)
+@@ -550,6 +560,7 @@ flip_setup_locked(void)
+ 		}
+ 		bzero((void *)flip_cpu[i], (size_t)A6_FB_STEP);     /* black borders around the fitted picture */
+ 	}
++	flip_tc = thread_call_allocate_with_priority(flip_tc_fire, NULL, THREAD_CALL_PRIORITY_KERNEL_HIGH);
+ 	flip_front = 0;
+ 	flip_state = 1;
+ 	a6_log("flip: three frames at %#llx + n * %#llx, %d pipe(s), VIG0/VIG1 offsets %#x/%#x, latched at TE\n",
+@@ -603,6 +614,30 @@ flip_poll_locked(void)
+ 	}
+ }
+ 
++static void
++flip_tc_arm(void)
++{
++	uint64_t dl;
++	if (flip_tc == NULL) {
++		return;
++	}
++	clock_interval_to_deadline(1000, NSEC_PER_USEC, &dl);
++	thread_call_enter_delayed(flip_tc, dl);
++}
++
++static void
++flip_tc_fire(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	bool again;
++	lck_mtx_lock(&sweet_gpu_lock);
++	flip_poll_locked();
++	again = flip_state == 1 && flip_pending >= 0 && ++flip_tc_tries < 60;
++	lck_mtx_unlock(&sweet_gpu_lock);
++	if (again) {
++		flip_tc_arm();
++	}
++}
++
+ void sweet_gpu_flip_poll(void);
+ void
+ sweet_gpu_flip_poll(void)
+@@ -974,6 +1009,8 @@ sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h,
+ 		if (rc == 0 && flip_state == 1) {
+ 			flip_pending = target;
+ 			flip_pending_fence = present_fence[k];
++			flip_tc_tries = 0;
++			flip_tc_arm();
+ 		}
+ 		present_next++;
+ 	}
+-- 
+2.43.0
+

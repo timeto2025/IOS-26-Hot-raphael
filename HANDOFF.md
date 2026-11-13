@@ -5,6 +5,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 18:25 MSK: 0177 flips (1 pipe); 0178 polls waiting flips every 1 ms
+- 0177 klog: "flip: three frames ... 1 pipe(s)", flipping, but flipped < swaps (e.g. 173 swaps / 100 flipped):
+  frames waited for the 60 Hz timer (not in phase with TE) and the next present replaced them. User: UI lags.
+- 0178: a 1 ms thread_call polls while a frame waits (up to 60 ms), so each frame goes out right after the
+  previous flip latched.
+- adspd: jitter buffer (idle 80 ms silence, 40 ms prefill, full periods only), raphael-tools 43451668671.
+
 ### raphael, 2026-11-13 17:50 MSK: Settings > Bluetooth hangs in NanoRegistry, not audio
 - oslog: BluetoothSettings loads, bluetoothd check-in fine, then Preferences looks up
   com.apple.nano.nanoregistry.paireddeviceregistry -> "No such process", "Using synchronous remote object for
