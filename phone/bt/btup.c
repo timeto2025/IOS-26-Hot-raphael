@@ -80,9 +80,18 @@ static int
 read_event(uint8_t *code, uint8_t *params, int timeout_ms)
 {
 	uint8_t t;
+	uint64_t end = now_ms() + (uint64_t)timeout_ms;
+	unsigned strays = 0;
 	for (;;) {
-		if (read_exact(&t, 1, timeout_ms)) {
+		int64_t left = (int64_t)(end - now_ms());
+		if (left <= 0 || read_exact(&t, 1, (int)left)) {
+			if (strays) {
+				printf("btup: %u bytes outside any packet\n", strays);
+			}
 			return -1;
+		}
+		if (t != 0x04 && t != 0x02 && strays++ < 16) {
+			printf("btup: stray byte %#04x\n", t);
 		}
 		if (t == 0x04) {
 			uint8_t h[2];
@@ -225,6 +234,7 @@ download(const char *path, int is_patch)
 int
 main(int argc, char **argv)
 {
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	const char *dev = "/dev/raphael-bt", *fwdir = "/var/local/fw/bt";
 	uint32_t baud = 3000000;
 	for (int i = 1; i + 1 < argc; i += 2) {
