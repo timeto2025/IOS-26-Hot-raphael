@@ -68,6 +68,7 @@ static bool     tfa_powered;
 static bool     tfa_enabled;
 static bool     voice_handset;
 static uint16_t tfa_rev;
+static bool     tfa_logged_unmute;
 
 static uint8_t *cnt;
 static size_t   cnt_len;
@@ -484,15 +485,22 @@ spk_amp_set_enable(bool enable)
 	if (on == tfa_enabled) {
 		return 0;
 	}
+	/*
+	 * Idle only mutes (AMPE=0) and keeps the device out of powerdown: leaving
+	 * PWDN means ~100 ms until CLKS, longer than the DSP queue ahead of the
+	 * speaker, so short sounds (keyboard clicks) were lost entirely.
+	 */
 	if (on) {
 		if (!tfa_powered && tfa_power_up() != 0) {
 			return -1;
 		}
 		(void)bf_set(BF_AMPE, 1);
-		usleep(5000);
-		tfa_log_status("unmuted");
+		if (!tfa_logged_unmute) {
+			tfa_logged_unmute = true;
+			tfa_log_status("unmuted");
+		}
 	} else {
-		tfa_power_down();
+		(void)bf_set(BF_AMPE, 0);
 	}
 	tfa_enabled = on;
 	g_status.amp_enabled = on;
@@ -569,7 +577,11 @@ spk_amp_cli(int argc, char **argv)
 		tfa_ok = true;
 		tfa_powered = false;
 		tfa_enabled = strcmp(op, "on") != 0;
-		return spk_amp_set_enable(strcmp(op, "on") == 0) == 0 ? 0 : 1;
+		if (strcmp(op, "off") == 0) {
+			tfa_power_down();
+			return 0;
+		}
+		return spk_amp_set_enable(true) == 0 ? 0 : 1;
 	}
 	if (strcmp(op, "status") == 0) {
 		tfa_log_status("cli");
