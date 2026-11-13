@@ -3,7 +3,8 @@
  *
  * btup: bring the K20 Pro's WCN3990 Bluetooth controller up over /dev/raphael-bt (bsd/dev/raphael_bt.c).
  *
- *   btup [-d DEV] [-f FWDIR] [-b BAUD]      (defaults /dev/raphael-bt, /var/local/fw/bt, 3000000)
+ *   btup [-d DEV] [-f FWDIR] [-b BAUD] [-n NN]   (defaults /dev/raphael-bt, /var/local/fw/bt, 3000000;
+ *                                               NN: firmware number in hex, default from the ROM version)
  *
  * The steps of Qualcomm's WCN399x bring-up (facts from Linux btqca.h / hci_qca.c, no code taken):
  *   1. power pulses at 2400 baud: 0xC0 (off), then 0xFC (on); 100 ms later the controller listens at 115200
@@ -259,6 +260,11 @@ main(int argc, char **argv)
 			printf(" %02x", ev[i]);
 		}
 		printf("\n");
+		/* raphael's WCN3998 answers with vendor event 0xff: 00 02 <product 4> <patch 2> <rom 2> <soc 4> */
+		if (code == 0xff && evlen >= 14 && ev[0] == 0x00) {
+			at = 2;
+			break;
+		}
 		for (int i = 0; i + 1 + 12 <= evlen; i++) {
 			if (ev[i] == 0x19 && (i == 0 || ev[i - 1] == 0x00)) {
 				at = i + 1;
@@ -273,7 +279,23 @@ main(int argc, char **argv)
 	uint32_t product = ev[at] | ev[at + 1] << 8 | ev[at + 2] << 16 | (uint32_t)ev[at + 3] << 24;
 	uint16_t patch = (uint16_t)(ev[at + 4] | ev[at + 5] << 8), rom = (uint16_t)(ev[at + 6] | ev[at + 7] << 8);
 	uint32_t soc = ev[at + 8] | ev[at + 9] << 8 | ev[at + 10] << 16 | (uint32_t)ev[at + 11] << 24;
+	/* the files are named by ROM version (Linux: crbtfwNN.tlv, NN from the ROM version's nibbles); if this
+	 * phone's partition has no such pair, the newest pair it has (raphael: 21, for the WCN3990/3998 v2.1) */
 	unsigned nn = ((rom & 0x0f00u) >> 4) | (rom & 0x000fu);
+	static const unsigned fallback[] = { 0x21, 0x20, 0x11 };
+	char probe[512];
+	snprintf(probe, sizeof(probe), "%s/crbtfw%02x.tlv", fwdir, nn);
+	for (unsigned i = 0; access(probe, R_OK) != 0 && i < sizeof(fallback) / sizeof(fallback[0]); i++) {
+		nn = fallback[i];
+		snprintf(probe, sizeof(probe), "%s/crbtfw%02x.tlv", fwdir, nn);
+	}
+	if (argc > 2) {
+		for (int i = 1; i + 1 < argc; i += 2) {
+			if (!strcmp(argv[i], "-n")) {
+				nn = (unsigned)strtoul(argv[i + 1], NULL, 16);
+			}
+		}
+	}
 	printf("btup: product %#x patch %#x rom %#x soc %#x: firmware crbtfw%02x.tlv / crnv%02x.bin\n", product, patch,
 	    rom, soc, nn, nn);
 
