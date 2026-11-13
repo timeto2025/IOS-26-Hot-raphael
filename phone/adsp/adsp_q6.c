@@ -151,7 +151,7 @@ static struct {
 
 static uint32_t next_cmd_token = 1u;
 static uint8_t  period_ready[ADSP_DMA_PERIODS];
-#define ADSP_MIN_QUEUED 2u
+#define ADSP_MIN_QUEUED 1u
 static uint64_t last_nonsilent_ms;
 static uint64_t last_voice_poll_ms;
 static uint64_t voice_retry_after_ms;
@@ -1379,9 +1379,13 @@ adsp_q6_tick(void)
 		/*
 		 * Pacing: while the HAL is actively writing, never hand the DSP a half-empty
 		 * period (the zero-filled tail is an audible click). Wait for a full period
-		 * as long as at least ADSP_MIN_QUEUED periods (40 ms) are still queued.
+		 * as long as at least ADSP_MIN_QUEUED periods (20 ms) are still queued.
+		 * "Writing" = the HAL's IO is running (speaker_running), or it wrote in the
+		 * last 250 ms: CoreAudio writes in bursts, a 60 ms window was too short.
 		 */
-		if (tone_frames_left == 0 && g_shm != NULL && cur - last_w_change_ms < 60ULL) {
+		if (tone_frames_left == 0 && g_shm != NULL &&
+		    (__atomic_load_n(&g_shm->speaker_running, __ATOMIC_ACQUIRE) != 0 ||
+		    cur - last_w_change_ms < 250ULL)) {
 			uint32_t avail = __atomic_load_n(&g_shm->write_frames, __ATOMIC_ACQUIRE) -
 			    __atomic_load_n(&g_shm->read_frames, __ATOMIC_RELAXED);
 			unsigned queued = 0;

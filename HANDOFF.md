@@ -5,6 +5,16 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 17:40 MSK: kernel 0177 (flip with one pipe), adspd pacing by speaker_running
+- Tearing: klog "flip: VIG0 0x9c000000 / VIG1 0 are not ABL's frame: one buffer" - booted from recovery, ABL
+  scans out through VIG0 alone, so 0164's triple buffer never engaged (every 5 s line: flip 0, gpu N cpu 0:
+  the GPU drew into the frame on screen). 0177: VIG1 address 0 = single pipe, flip VIG0 only, flush bit 0x1.
+- Audio: adspd tone (generated in adspd) is clean; HAL audio crackles/stutters -> feeding, not I2S/TFA. Pacing
+  now waits for full periods while the HAL IO runs (shm speaker_running) or wrote in the last 250 ms, down to
+  1 queued period. raphael skips the 20 s wait for cellulard's hot-qrtr.sock at start.
+- CoreHaptics keyboard clicks: with hapticd kept (DROP_MACH=""), audiomxd still never answers
+  ("Initial XPC call to server timed out"); audio_plugin.c has an ACTUATOR output stream already.
+
 ### raphael, 2026-11-13 17:20 MSK: FIRST SOUND from the speaker (adspd tone 2000, sweetaudio=0 image)
 - PAS at 0x8be00000+0x2200000 ok (14.2 MB loaded, auth_and_reset rc=0, SMP2P ready 100 ms), GLINK/QRTR/APR up,
   SMMU SID 0x1b21 -> CB6, AFE 0x1006 SD0 stereo 48 kHz 24-bit started.

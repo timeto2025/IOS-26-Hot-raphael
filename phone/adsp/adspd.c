@@ -369,6 +369,10 @@ wait_for_wland_qrtr(void)
 {
 	bool qrtr_up = qrtr_sock_is_live();
 
+#ifdef ADSP_BOARD_RAPHAEL
+	/* raphael has no cellulard QRTR mux: only wait for wland's own modem bring-up */
+	qrtr_up = true;
+#endif
 	if (!qrtr_up) {
 		adsp_log("coexist: waiting up to 20s for live %s...", QRTR_MUX_SOCK_PATH);
 		for (int i = 0; i < 200 && !g_stop_requested; i++) {
