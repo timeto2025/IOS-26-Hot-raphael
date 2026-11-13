@@ -1,0 +1,131 @@
+From e0ce0f31c1dd60f62cd34c8d22d1f2cb8d185e50 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 05:50:40 +0300
+Subject: [PATCH] raphael BT: commands the WCN3998 lacks answered by the kernel
+ (raphbtfake; default Write/Read Default Erroneous Data Reporting), QCA debug
+ handle match fixed
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c | 87 +++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 86 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index 9481bdc..15ca13f 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -710,10 +710,78 @@ bt_ctl_log_rx(const uint8_t *p, uint32_t n)
+ 	}
+ }
+ 
++/*
++ * Commands bluetoothd requires but this controller lacks (boot-arg raphbtfake=OPCODE.OCTET.BIT.RETLEN,...; hex
++ * opcode, decimal rest): their bit is set in the Read_Local_Supported_Commands answer and the kernel answers
++ * them with success and RETLEN zero bytes instead of sending them on. Default: Write/Read Default Erroneous
++ * Data Reporting (0x0c5b/0x0c5a, octet 18 bits 3/2): iOS 26 bluetoothd stops its HCI initialization without
++ * them ("OI_HCICMD_WriteDefaultErroneousDataReporting (status=628)", "HCI initialization failed").
++ */
++#define BT_FAKE_MAX 24
++static struct bt_fake {
++	uint16_t op;
++	uint8_t octet, bit, retlen;
++} bt_fake[BT_FAKE_MAX];
++static unsigned bt_nfake;
++
++static void
++bt_fake_parse(void)
++{
++	char buf[256] = "0c5b.18.3.0,0c5a.18.2.1";
++	(void)PE_parse_boot_arg_str("raphbtfake", buf, sizeof(buf));
++	const char *c = buf;
++	while (*c && bt_nfake < BT_FAKE_MAX) {
++		unsigned v[4] = { 0, 0, 0, 0 }, k = 0;
++		for (; *c && *c != ','; c++) {
++			if (*c == '.') {
++				if (++k > 3) {
++					break;
++				}
++				continue;
++			}
++			unsigned d;
++			if (*c >= '0' && *c <= '9') {
++				d = (unsigned)(*c - '0');
++			} else if (k == 0 && (*c | 0x20) >= 'a' && (*c | 0x20) <= 'f') {
++				d = (unsigned)((*c | 0x20) - 'a' + 10);
++			} else {
++				continue;
++			}
++			v[k] = v[k] * (k == 0 ? 16u : 10u) + d;
++		}
++		if (*c == ',') {
++			c++;
++		}
++		if (k == 3 && v[1] < 64 && v[2] < 8 && v[3] < 250) {
++			bt_fake[bt_nfake++] = (struct bt_fake){ (uint16_t)v[0], (uint8_t)v[1], (uint8_t)v[2], (uint8_t)v[3] };
++			printf("RAPH BT: command %#06x answered by the kernel (supported-commands octet %u bit %u, %u bytes)\n",
++			    v[0], v[1], v[2], v[3]);
++		}
++	}
++}
++
++static const struct bt_fake *
++bt_fake_find(uint16_t op)
++{
++	for (unsigned i = 0; i < bt_nfake; i++) {
++		if (bt_fake[i].op == op) {
++			return &bt_fake[i];
++		}
++	}
++	return NULL;
++}
++
+ static void
+ bt_ctl_deliver(kern_ctl_ref ref, uint32_t unit)
+ {
+-	if (fr.pk[0] == 2 && ((fr.pk[1] | fr.pk[2] << 8) & 0xfffu) == QCA_DEBUG_HANDLE) {
++	/* Read_Local_Supported_Commands: 04 0e len ncmd 02 10 status + 64 octets */
++	if (fr.pk[0] == 4 && fr.pk[1] == 0x0e && fr.n >= 7u + 64u && fr.pk[4] == 0x02 && fr.pk[5] == 0x10 &&
++	    fr.pk[6] == 0) {
++		for (unsigned i = 0; i < bt_nfake; i++) {
++			fr.pk[7 + bt_fake[i].octet] |= (uint8_t)(1u << bt_fake[i].bit);
++		}
++	}
++	if (fr.pk[0] == 2 && (fr.pk[1] | fr.pk[2] << 8) == QCA_DEBUG_HANDLE) {       /* handle 0xedc, PB flags 2 */
+ 		if (fr.dropped_dbg++ == 0) {
+ 			printf("RAPH BT: controller debug log packets (ACL handle %#x) are dropped\n", QCA_DEBUG_HANDLE);
+ 		}
+@@ -845,6 +913,22 @@ bt_ctl_send(kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mbuf_t m,
+ 		}
+ 		const uint8_t *d = (const uint8_t *)mbuf_data(seg);
+ 		bt_ctl_log_tx(d, len);
++		if (len >= 4 && d[0] == 1 && len == 4u + d[3]) {
++			const struct bt_fake *f = bt_fake_find((uint16_t)(d[1] | d[2] << 8));
++			if (f != NULL) {
++				uint8_t ev[7 + 250];
++				bzero(ev, sizeof(ev));
++				ev[0] = 4;
++				ev[1] = 0x0e;
++				ev[2] = (uint8_t)(4 + f->retlen);
++				ev[3] = 1;
++				ev[4] = d[1];
++				ev[5] = d[2];
++				(void)ctl_enqueuedata(ref, unit, ev, 7u + f->retlen, 0);
++				printf("RAPH BT: < complete %#06x status 0 (answered by the kernel)\n", f->op);
++				continue;
++			}
++		}
+ 		/* raphbtvsc=1: vendor commands (OGF 0x3f, Apple's and Broadcom's) answered here with success */
+ 		if (bt.vsc && len >= 4 && d[0] == 1 && (d[2] >> 2) == 0x3fu && len == 4u + d[3]) {
+ 			uint8_t ev[7] = { 4, 0x0e, 4, 1, d[1], d[2], 0 };
+@@ -987,6 +1071,7 @@ raphael_bt_init(void)
+ 		thread_deallocate(thread);
+ 	}
+ 	(void)PE_parse_boot_argn("raphbtvsc", &bt.vsc, sizeof(bt.vsc));
++	bt_fake_parse();
+ 	bt_ctl_register();
+ 	printf("RAPH BT: /dev/raphael-bt ready (UART set up at first open)\n");
+ }
+-- 
+2.43.0
+

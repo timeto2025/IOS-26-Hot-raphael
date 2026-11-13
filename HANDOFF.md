@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 05:55 MSK: kernel 0171 (bluetoothd's HCI init: Erroneous Data Reporting)
+- oslog (`/var/local/bin/oslog -t 30 -l bluetoothd`) with 0170: bluetoothd's mask print shows octet 18 = 0x83
+  (no Read/Write Default Erroneous Data Reporting); after LE_SetPeriodicAdvListSize it fails
+  "OI_HCICMD_WriteDefaultErroneousDataReporting (status=628)" -> "HCI initialization failed", reason 108, exit 1.
+  Also logged (tolerated): "Unable to turn on BT)_WAKE signal (status=65535)".
+- 0171: raphbtfake=OPCODE.OCTET.BIT.RETLEN,... (default 0c5b.18.3.0,0c5a.18.2.1): bit set in the supported-commands
+  answer, the command answered by the kernel. The next missing command can be added with EXTRA_ARGS (no kernel build).
+- Also seen: Wi-Fi dropped once during the bluetoothd restart loop and only came back after the S24 hotspot restarted.
+
 ### raphael, 2026-11-13 05:30 MSK: kernel 0170 (BT framer + exit log)
 - Observed with 0169: bluetoothd connects to com.apple.uart.bluetooth, asks the bluetool stand-in for "boot"/"init"
   (answered 0), sends HCI_Reset, Read_Local_Version, Supported_Commands, BD_ADDR, Features, Set_Event_Mask,
