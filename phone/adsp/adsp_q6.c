@@ -151,6 +151,7 @@ static struct {
 
 static uint32_t next_cmd_token = 1u;
 static uint8_t  period_ready[ADSP_DMA_PERIODS];
+#define ADSP_MIN_QUEUED 2u
 static uint64_t last_nonsilent_ms;
 static uint64_t last_voice_poll_ms;
 static uint64_t voice_retry_after_ms;
@@ -1361,9 +1362,36 @@ adsp_q6_tick(void)
 	}
 
 	int16_t pcm_buf[ADSP_PCM_PERIOD_FRAMES * HAKIOS_AUDIO_CHANNELS];
+	static uint32_t last_w;
+	static uint64_t last_w_change_ms;
+
+	if (g_shm != NULL) {
+		uint32_t w = __atomic_load_n(&g_shm->write_frames, __ATOMIC_ACQUIRE);
+		if (w != last_w) {
+			last_w = w;
+			last_w_change_ms = cur;
+		}
+	}
 	for (uint32_t p = 0; p < ADSP_DMA_PERIODS; p++) {
 		if (!period_ready[p]) {
 			continue;
+		}
+		/*
+		 * Pacing: while the HAL is actively writing, never hand the DSP a half-empty
+		 * period (the zero-filled tail is an audible click). Wait for a full period
+		 * as long as at least ADSP_MIN_QUEUED periods (40 ms) are still queued.
+		 */
+		if (tone_frames_left == 0 && g_shm != NULL && cur - last_w_change_ms < 60ULL) {
+			uint32_t avail = __atomic_load_n(&g_shm->write_frames, __ATOMIC_ACQUIRE) -
+			    __atomic_load_n(&g_shm->read_frames, __ATOMIC_RELAXED);
+			unsigned queued = 0;
+			for (uint32_t q = 0; q < ADSP_DMA_PERIODS; q++) {
+				queued += period_ready[q] ? 0u : 1u;
+			}
+			if (avail < ADSP_PCM_PERIOD_FRAMES && avail <= HOT_AUDIO_RING_FRAMES &&
+			    queued >= ADSP_MIN_QUEUED) {
+				break;
+			}
 		}
 		bool signal = fill_period_pcm(pcm_buf, ADSP_PCM_PERIOD_FRAMES);
 		uint64_t pa = ADSP_DMA_PA + (uint64_t)p * ADSP_DMA_PERIOD_ALLOC;
