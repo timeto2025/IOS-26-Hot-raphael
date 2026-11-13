@@ -10,6 +10,8 @@ on:
     branches: [main, master, upgrade_ios_version_target, 'ci/*']
     paths:
       - "phone/**"
+      - "!phone/wifi/**"
+      - "!phone/bt/**"
       - "tools/build-turnip-ios.sh"
       - "tools/build-m2v-bridge.sh"
       - ".github/workflows/userland.yml"
