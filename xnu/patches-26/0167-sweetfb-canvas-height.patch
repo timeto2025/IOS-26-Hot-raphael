@@ -1,0 +1,47 @@
+From 732ef5fc502da0893a5c8a51ad111240fe8953cf Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 03:39:25 +0300
+Subject: [PATCH] sweetfb_h=N: canvas height for the framebuffer and touch
+ (raphael 2436)
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 6 ++++++
+ iokit/Kernel/arm/hid/SweetHID.cpp     | 5 +++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index eb2b28f..a3e0e41 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -229,6 +229,12 @@ AppleCLCD::start(IOService *provider)
+ 	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
++		/* sweetfb_h=N: another canvas height (raphael: 2436, the iPhone 11 Pro's own, the panel's aspect) */
++		uint32_t canvas_h = 0;
++		if (PE_parse_boot_argn("sweetfb_h", &canvas_h, sizeof(canvas_h)) && canvas_h >= fHeight &&
++		    canvas_h <= 2800) {
++			fLogicalH = canvas_h;
++		}
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 158932c..0759fcc 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -461,6 +461,11 @@ SweetHIDTouch::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = native ? 1080 : 1125;
+ 	fLogicalH = native ? SWEET_PANEL_H : 2499;
++	uint32_t canvas_h = 0;
++	if (!native && PE_parse_boot_argn("sweetfb_h", &canvas_h, sizeof(canvas_h)) && canvas_h >= SWEET_PANEL_H &&
++	    canvas_h <= 2800) {
++		fLogicalH = (int)canvas_h;      /* as SweetFramebuffer.cpp */
++	}
+ 	fOffX = (fLogicalW - SWEET_PANEL_W) / 2;
+ 	fOffY = (fLogicalH - SWEET_PANEL_H) / 2;
+ 	fCornerRadius = SWEET_DISPLAY_CORNER_DEFAULT;
+-- 
+2.43.0
+

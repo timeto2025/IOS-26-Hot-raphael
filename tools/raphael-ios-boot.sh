@@ -70,8 +70,13 @@ fi
 # present a 1125x2499 display; a 2437 ADT canvas made backboardd render 1125x2437 into it and
 # grow its GPU pool share until allocations failed (missing icons, wallpaper, Control Center).
 # EXTRA_ARGS="a=1 b=2": appended to the boot args (A/B tests, e.g. raphpanel=0 or GPURESERVE checks)
+# CANVAS_H (default 2436, kernel 0167+): the canvas iOS draws, 1125 wide. 2436 is the iPhone 11 Pro's own
+# (375x812 points @3x) and the K20 Pro panel's shape (1125x2436 x 0.96 = 1080x2339): no bars, no stretch.
+# The kernel (sweetfb_h=), touch and the ADT must agree. CANVAS_H=2499 for kernels before 0167.
+CANVAS_H=${CANVAS_H:-2436}
+[[ "$CANVAS_H" != 2499 ]] && CMDLINE+=" sweetfb_h=$CANVAS_H"
 [[ -n "${EXTRA_ARGS:-}" ]] && CMDLINE+=" $EXTRA_ARGS"
-python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael --canvas-height 2499
+python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael --canvas-height "$CANVAS_H"
 
 overlay_args=(-o "$WORK/ios26-overlay-raphael.tar" --root-img "$ROOTIMG"
 	--userland-dir "$WORK/userland" --timezone "${TZ:-Europe/Moscow}" --register-missing-hot-daemons)
@@ -94,7 +99,7 @@ if [[ -z "${WALLPAPER:-}" ]]; then
 	WALLPAPER=$WORK/wallpaper-default.png
 	python3 "$ROOT/tools/raphael-default-wallpaper.py" "$WALLPAPER"
 fi
-overlay_args+=(--wallpaper "$WALLPAPER" --wallpaper-size 1125x2499)
+overlay_args+=(--wallpaper "$WALLPAPER" --wallpaper-size "1125x$CANVAS_H")
 # WLAN_CONF=FILE ("ssid=NAME" / "psk=PASSPHRASE" lines): wland joins that network by itself at boot.
 # It ends up in the boot image and in darwin (/var/local/wlan.conf, 0600); never in git.
 if [[ -n "${WLAN_CONF:-}" ]]; then
