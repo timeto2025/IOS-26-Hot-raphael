@@ -36,7 +36,11 @@ def main():
         if not cls:
             sys.exit('tools/hot-dbg.py has no client class')
         client = cls[0](host)
-    d = client.diag()
+    try:
+        d = client.diag()
+    except OSError as e:
+        sys.exit(f'cannot reach {host}:2223 ({e}): is iOS booted and on the same Wi-Fi / USB network? '
+                 'Settings > Wi-Fi > (i) shows its IP.')
     total = d.get('system', {}).get('klog_bytes_total', 0)
     cursor, text = 0, b''
     while cursor < total:
