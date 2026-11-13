@@ -39,7 +39,8 @@ jobs:
           set -e
           mkdir -p phone/bt/out
           work/userland/bin/ios-cc -O2 -Wall -o phone/bt/out/btup phone/bt/btup.c
-          codesign -f -s - phone/bt/out/btup || true
+          work/userland/bin/ios-cc -O2 -Wall -o phone/bt/out/put phone/bt/put.c
+          codesign -f -s - phone/bt/out/btup phone/bt/out/put || true
           file phone/bt/out/btup
 
       - name: dash (/bin/sh)
@@ -68,7 +69,7 @@ jobs:
         run: |
           mkdir -p dist/bin
           cp phone/wifi/out/wland dist/bin/
-          cp phone/bt/out/btup dist/bin/
+          cp phone/bt/out/btup phone/bt/out/put dist/bin/
           cp work/userland/src/dash-0.5.12/src/dash dist/bin/
           tar czf raphael-tools.tar.gz -C dist .
           tar tzvf raphael-tools.tar.gz

@@ -172,8 +172,13 @@ load(const char *path, size_t *len)
 	return d;
 }
 
+/*
+ * The patch file's header says which events the controller sends per segment (tlv_type_patch.download_mode,
+ * byte 14 of the file: 0 a vendor event and a Command Complete, 1 only the Command Complete, 2 only the vendor
+ * event, 3 none). raphael's crbtfw21.tlv: none, so every segment just goes out. NVM files: both events.
+ */
 static int
-download(const char *path)
+download(const char *path, int is_patch)
 {
 	size_t len;
 	uint8_t *d = load(path, &len);
@@ -181,7 +186,9 @@ download(const char *path)
 		printf("btup: %s: %s\n", path, strerror(errno));
 		return -1;
 	}
-	printf("btup: %s: %zu bytes\n", path, len);
+	int mode = is_patch && len > 14 ? d[14] & 3 : 0;
+	printf("btup: %s: %zu bytes, download mode %d (%s)\n", path, len, mode,
+	    mode == 3 ? "no events" : mode == 2 ? "vendor event" : mode == 1 ? "command complete" : "both events");
 	size_t off = 0;
 	unsigned seg = 0;
 	while (off < len) {
@@ -190,15 +197,25 @@ download(const char *path)
 		p[0] = 0x1e;
 		p[1] = (uint8_t)n;
 		memcpy(p + 2, d + off, n);
-		uint8_t ev[256];
-		int evlen = 0;
-		if (cmd(0xfc00, p, (uint8_t)(n + 2), ev, &evlen, 3000) < 0) {
-			printf("btup: segment %u at %zu: no answer\n", seg, off);
+		if (send_cmd(0xfc00, p, (uint8_t)(n + 2))) {
+			printf("btup: segment %u: write failed\n", seg);
 			free(d);
 			return -1;
 		}
+		int want = mode == 3 ? 0 : mode == 0 ? 2 : 1;
+		for (int k = 0; k < want; k++) {
+			uint8_t code, ev[256];
+			if (read_event(&code, ev, 3000) < 0) {
+				printf("btup: segment %u at %zu: no event %d of %d\n", seg, off, k + 1, want);
+				free(d);
+				return -1;
+			}
+		}
 		off += n;
 		seg++;
+	}
+	if (mode == 3) {
+		usleep(200000);         /* the controller applies the patch: no event to wait for */
 	}
 	printf("btup: %s: %u segments sent\n", path, seg);
 	free(d);
@@ -326,11 +343,11 @@ main(int argc, char **argv)
 	/* 4. firmware */
 	char path[512];
 	snprintf(path, sizeof(path), "%s/crbtfw%02x.tlv", fwdir, nn);
-	if (download(path)) {
+	if (download(path, 1)) {
 		return 3;
 	}
 	snprintf(path, sizeof(path), "%s/crnv%02x.bin", fwdir, nn);
-	if (download(path)) {
+	if (download(path, 0)) {
 		return 3;
 	}
 
