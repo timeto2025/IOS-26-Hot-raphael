@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 19:15 MSK: audio compared with HackiOS ports (redwood, OnePlus 8 instantnoodle)
+- OnePlus 8 (dekefake/hackios-op8pro, Evsio0n/instantnoodle-xnu): 2x TFA9874 rev 0x0c74 on TERT MI2S, two 32-bit
+  slots, 3.072 MHz, same NXP cold-start order as ours; ADM/ASM topologies NONE (0x10312 / 0x10c68); level applied to
+  the samples; a software "guard" stands in for the ADSP's TFADSP protection: 200 Hz HPF, power/peak limiter,
+  default 12 dB under Android's max. Amps powered after 3 s silence, start 26-39 ms (inside the 160 ms queue).
+- Ours used stock RMX's processing topologies uncalibrated, stereo into a mono amp (right channel lost), full scale,
+  no HPF. adspd now: adsptopo=0 (NONE, raphael default; 1 = old), mono (L+R)/2 (adspmono), adspatten=6 dB,
+  adsphpf=150 Hz; feed telemetry adds TFA status (OCP/UVP/OTP/TDMERR/NOCLK/CLIP, state).
+
 ### raphael, 2026-11-13 18:25 MSK: 0177 flips (1 pipe); 0178 polls waiting flips every 1 ms
 - 0177 klog: "flip: three frames ... 1 pipe(s)", flipping, but flipped < swaps (e.g. 173 swaps / 100 flipped):
   frames waited for the 60 Hz timer (not in phase with TE) and the next present replaced them. User: UI lags.

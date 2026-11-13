@@ -219,6 +219,7 @@ int      spk_amp_init(void);
 int      spk_amp_set_enable(bool enable);
 int      spk_amp_set_voice_mode(bool voice_call, bool speakerphone);
 int      spk_amp_cli(int argc, char **argv);
+int      spk_amp_status(char *buf, size_t len);   /* one line of the amp's status registers, -1 if none */
 
 /* ---- Multi-channel GLINK + QRTR pd-mapper/tftp + FastRPC audiopd (adsp_glink.c) ---- */
 int      adsp_glink_prepare(void);

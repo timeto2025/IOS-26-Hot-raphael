@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/sysctl.h>
 
 #include "adspd.h"
 
@@ -604,6 +605,110 @@ q6_send_period_write(uint32_t idx)
 	return 0;
 }
 
+/* boot-arg NAME=VALUE (kern.bootargs), or def */
+static long
+adsp_bootarg(const char *name, long def)
+{
+	static char args[1024];
+	static bool loaded;
+	size_t len = sizeof(args) - 1;
+	size_t nl = strlen(name);
+
+	if (!loaded) {
+		loaded = true;
+		if (sysctlbyname("kern.bootargs", args, &len, NULL, 0) != 0) {
+			args[0] = 0;
+		}
+	}
+	for (const char *a = args; (a = strstr(a, name)) != NULL; a += nl) {
+		if ((a == args || a[-1] == ' ') && a[nl] == '=') {
+			return strtol(a + nl + 1, NULL, 0);
+		}
+	}
+	return def;
+}
+
+/*
+ * The speaker path's own processing (raphael: one TFA9874 on slot 0, no DSP speaker protection
+ * as Android has it in the ADSP; the OnePlus 8 / HackiOS ports do the same in their "guard"):
+ *   - mono: (L + R) / 2 into both slots, the amplifier only plays slot 0 (left);
+ *   - headroom: adspatten=N dB under full scale (raphael default 6);
+ *   - a 2nd-order Butterworth high-pass at adsphpf=Hz (raphael default 150, 0 = off): the small
+ *     speaker cannot move bass at full level, it distorts (crackles) instead.
+ */
+static struct {
+	bool  init, mono;
+	float gain;
+	float b0, b1, b2, a1, a2;
+	float x1, x2, y1, y2;
+} spk;
+
+static void
+spk_proc_init(void)
+{
+#ifdef ADSP_BOARD_RAPHAEL
+	long atten = adsp_bootarg("adspatten", 6), hz = adsp_bootarg("adsphpf", 150);
+	spk.mono = adsp_bootarg("adspmono", 1) != 0;
+#else
+	long atten = adsp_bootarg("adspatten", 0), hz = adsp_bootarg("adsphpf", 0);
+	spk.mono = adsp_bootarg("adspmono", 0) != 0;
+#endif
+	if (atten < 0) atten = 0;
+	if (atten > 40) atten = 40;
+	spk.gain = powf(10.0f, -(float)atten / 20.0f);
+	if (hz > 0 && hz < 2000) {
+		float w = 2.0f * (float)M_PI * (float)hz / (float)HAKIOS_AUDIO_RATE;
+		float cw = cosf(w), alpha = sinf(w) / (2.0f * (float)M_SQRT1_2);
+		float a0 = 1.0f + alpha;
+		spk.b0 = (1.0f + cw) / 2.0f / a0;
+		spk.b1 = -(1.0f + cw) / a0;
+		spk.b2 = (1.0f + cw) / 2.0f / a0;
+		spk.a1 = -2.0f * cw / a0;
+		spk.a2 = (1.0f - alpha) / a0;
+	} else {
+		spk.b0 = 1.0f;
+	}
+	spk.init = true;
+	adsp_log("speaker: %s, %ld dB headroom, high-pass %ld Hz", spk.mono ? "mono (L+R)/2" : "stereo", atten,
+	    hz > 0 && hz < 2000 ? hz : 0L);
+}
+
+static inline int16_t
+spk_sat(float v)
+{
+	if (v > 32767.0f) return 32767;
+	if (v < -32768.0f) return -32768;
+	return (int16_t)lrintf(v);
+}
+
+/* in place, stereo int16 */
+static void
+spk_process(int16_t *st, uint32_t frames)
+{
+	if (!spk.init) {
+		spk_proc_init();
+	}
+	for (uint32_t i = 0; i < frames; i++) {
+		float l = st[2 * i], r = st[2 * i + 1];
+		if (spk.mono) {
+			l = r = 0.5f * (l + r);
+		}
+		if (spk.b0 != 1.0f || spk.b1 != 0.0f) {
+			float y = spk.b0 * l + spk.b1 * spk.x1 + spk.b2 * spk.x2 - spk.a1 * spk.y1 - spk.a2 * spk.y2;
+			spk.x2 = spk.x1;
+			spk.x1 = l;
+			spk.y2 = spk.y1;
+			spk.y1 = y;
+			l = y;
+			if (spk.mono) {
+				r = y;
+			}
+		}
+		st[2 * i] = spk_sat(l * spk.gain);
+		st[2 * i + 1] = spk_sat(r * spk.gain);
+	}
+}
+
 static bool
 fill_period_pcm(int16_t *dst_stereo, uint32_t frames)
 {
@@ -674,11 +779,27 @@ fill_period_pcm(int16_t *dst_stereo, uint32_t frames)
 	if (take < frames) {
 		memset(&dst_stereo[take * 2], 0, (size_t)(frames - take) * HAKIOS_AUDIO_FRAME);
 	}
+	spk_process(dst_stereo, frames);
 	if (take > 0) {
 		__atomic_store_n(&g_shm->read_frames, r + take, __ATOMIC_RELEASE);
 		g_status.frames_played += take;
 	}
 	return has_signal;
+}
+
+/*
+ * adsptopo=0: ADM/ASM without the DSP's processing (0x10312 / 0x10c68), as the HackiOS ports
+ * (redwood, OnePlus 8) run their speakers; adsptopo=1: stock RMX1931's 0x10314 / 0x10be4,
+ * which on raphael run uncalibrated (no ACDB). Default: 0 on raphael, 1 on RMX1931.
+ */
+static bool
+adsp_topo_none(void)
+{
+#ifdef ADSP_BOARD_RAPHAEL
+	return adsp_bootarg("adsptopo", 0) == 0;
+#else
+	return adsp_bootarg("adsptopo", 1) == 0;
+#endif
 }
 
 static int
@@ -707,7 +828,7 @@ q6_open_media_stream(void)
 		.mode_of_operation   = 1u,      /* ADM_PATH_PLAYBACK */
 		.endpoint_id_1       = AFE_PORT_ID_QUATERNARY_MI2S_RX,
 		.endpoint_id_2       = 0xffffu,
-		.topology_id         = ADM_DEFAULT_COPP_TOPOLOGY,
+		.topology_id         = adsp_topo_none() ? ADM_TOPOLOGY_NONE : ADM_DEFAULT_COPP_TOPOLOGY,
 		.dev_num_channel     = HAKIOS_AUDIO_CHANNELS,
 		.bit_width           = (uint16_t)adsp_i2s_bits(),
 		.sample_rate         = HAKIOS_AUDIO_RATE,
@@ -723,7 +844,7 @@ q6_open_media_stream(void)
 		.mode_flags         = 0u,
 		.sink_endpoint_type = 0u,
 		.bits_per_sample    = 16u,
-		.postproc_topo_id   = ASM_DEFAULT_POPP_TOPOLOGY,
+		.postproc_topo_id   = adsp_topo_none() ? ASM_TOPOLOGY_NONE : ASM_DEFAULT_POPP_TOPOLOGY,
 		.dec_fmt_id         = ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V4,
 	};
 	struct {
@@ -1468,14 +1589,18 @@ adsp_q6_tick(void)
 			feed_min_avail = feed_min_queued = ~0u;
 		} else if (cur - t0 >= 5000ULL) {
 			uint64_t dt = cur - t0;
+			char amp[128] = "";
+			if (g_status.amp_enabled && spk_amp_status(amp, sizeof(amp)) != 0) {
+				amp[0] = 0;
+			}
 			adsp_log("feed %llums: hal +%u (%u fps) dsp +%u periods (%u fps); full %u silence %u waits %u "
-			    "resync %u; backlog %u..%u queued>=%u state %d underruns %llu; hal gaps %u (last %d) cycle %u/%u",
+			    "resync %u; backlog %u..%u queued>=%u state %d underruns %llu; hal gaps %u (last %d) cycle %u/%u; %s",
 			    (unsigned long long)dt, last_w - w0, (unsigned)((uint64_t)(last_w - w0) * 1000ULL / dt),
 			    (uint32_t)g_status.periods_written - pw0,
 			    (unsigned)((uint64_t)((uint32_t)g_status.periods_written - pw0) * ADSP_PCM_PERIOD_FRAMES * 1000ULL / dt),
 			    feed_full, feed_silence, feed_waits, feed_resyncs, feed_min_avail, feed_max_avail,
 			    feed_min_queued, feed_state, (unsigned long long)g_status.underruns,
-			    g_shm->reserved[0], (int)g_shm->reserved[1], g_shm->reserved[2], g_shm->reserved[3]);
+			    g_shm->reserved[0], (int)g_shm->reserved[1], g_shm->reserved[2], g_shm->reserved[3], amp);
 			t0 = cur;
 			w0 = last_w;
 			pw0 = (uint32_t)g_status.periods_written;

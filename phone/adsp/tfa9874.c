@@ -522,6 +522,23 @@ spk_amp_set_voice_mode(bool voice_call, bool speakerphone)
 	return 0;
 }
 
+int
+spk_amp_status(char *buf, size_t len)
+{
+	uint16_t r10 = 0, r11 = 0, r13 = 0, r14 = 0;
+
+	if (!tfa_ok || tfa_rd(0x10, &r10) != 0 || tfa_rd(0x11, &r11) != 0 || tfa_rd(0x13, &r13) != 0 ||
+	    tfa_rd(0x14, &r14) != 0) {
+		return -1;
+	}
+	/* 0x10: VDDS/OTDS/OCDS/UVDS/MANALARM/TDMERR/NOCLK (sticky), 0x11 CLKS/AMPS, 0x13 CLIPS bit 9, 0x14 MANSTATE */
+	snprintf(buf, len, "tfa %04x/%04x/%04x/%04x%s%s%s%s%s%s state %u", r10, r11, r13, r14,
+	    (r10 & 0x0008) ? " OCP" : "", (r10 & 0x0010) ? " UVP" : "", (r10 & 0x0004) ? " OTP" : "",
+	    (r10 & 0x0040) ? " TDMERR" : "", (r10 & 0x0080) ? " NOCLK" : "", (r13 & 0x0200) ? " CLIP" : "",
+	    (r14 >> 3) & 0xfu);
+	return 0;
+}
+
 /* ---- CLI: adspd tfa dump|r REG|w REG VAL|init|on|off ---- */
 
 int

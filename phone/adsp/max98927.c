@@ -239,3 +239,11 @@ spk_amp_cli(int argc, char **argv)
 	fprintf(stderr, "amp: no CLI for MAX98937 (use i2c-scan)\n");
 	return 2;
 }
+
+int
+spk_amp_status(char *buf, size_t len)
+{
+	(void)buf;
+	(void)len;
+	return -1;
+}
