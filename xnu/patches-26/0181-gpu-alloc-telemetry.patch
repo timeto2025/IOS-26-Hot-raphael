@@ -1,0 +1,110 @@
+From c482fafc284f22a740e8deade5302195757ff46c Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 02:09:05 +0300
+Subject: [PATCH] sweet MTL: 5 s allocation telemetry (allocs, zeroing time,
+ recycled, frees by path, pool free)
+
+---
+ iokit/Kernel/arm/SweetAccelerator.cpp | 53 +++++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+index 760403e..69fdb47 100644
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -37,6 +37,7 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOLib.h>
++#include <kern/clock.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+@@ -724,6 +725,34 @@ sweet_retire_init_lock(void)
+  * for exactly that size gets it back at once, unzeroed (it is its own memory). Up to 192 MB, oldest out first,
+  * emptied whenever the pool runs short. Boot-arg sweetgpurecycle=0 turns it off.
+  */
++/* 5 s allocation telemetry (klog "SWEET MTL: 5s:"): where backboardd's frame time goes */
++static struct {
++	uint64_t allocs, big, bytes, zeroed, alloc_ns, zero_ns, max_ns, reused;
++	uint64_t free_cached, free_pool, free_zombie;
++	uint64_t t0;
++} mst;
++
++static void
++mst_tick(void)
++{
++	uint64_t now = mach_absolute_time(), ns;
++	if (mst.t0 == 0) {
++		mst.t0 = now;
++		return;
++	}
++	absolutetime_to_nanoseconds(now - mst.t0, &ns);
++	if (ns < 5000000000ULL || mst.allocs == 0) {
++		return;
++	}
++	IOLog("SWEET MTL: 5s: %llu allocs (%llu >= 8 MB, %llu MB; %llu recycled), %llu ms in alloc (max %llu ms), "
++	    "%llu MB zeroed in %llu ms; freed %llu to the cache, %llu to the pool, %llu still CPU-mapped (zombie); "
++	    "pool free %llu MB\n", mst.allocs, mst.big, mst.bytes >> 20, mst.reused, mst.alloc_ns / 1000000ULL,
++	    mst.max_ns / 1000000ULL, mst.zeroed >> 20, mst.zero_ns / 1000000ULL, mst.free_cached, mst.free_pool,
++	    mst.free_zombie, sweet_gpu_pool_avail() >> 20);
++	bzero(&mst, sizeof(mst));
++	mst.t0 = now;
++}
++
+ #define RC_SLOTS        64
+ #define RC_MAX_BYTES    (192ULL << 20)
+ #define RC_MIN_BYTES    (1ULL << 20)
+@@ -861,7 +890,13 @@ sweet_v2_finish_retired_batch(const struct sweet_v2_retired *batch, uint32_t n)
+ 		} else if (batch[i].md->getRetainCount() <= 1 &&
+ 		    rc_put(batch[i].owner, batch[i].pool_pa, batch[i].md->getLength())) {
+ 			batch[i].md->release();
++			mst.free_cached++;
+ 		} else {
++			if (batch[i].md->getRetainCount() <= 1) {
++				mst.free_pool++;
++			} else {
++				mst.free_zombie++;
++			}
+ 			sweet_pool_release(batch[i].md, batch[i].pool_pa);
+ 		}
+ 	}
+@@ -1115,6 +1150,7 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 			return kIOReturnBadArgument;
+ 		}
+ 		/* memory XNU does not manage (sweet_gpu.c: no cacheable alias), zeroed through a WC kernel view */
++		uint64_t mst_t0 = mach_absolute_time();
+ 		(void)sweet_v2_reap_retired();
+ 		sweet_zombie_sweep();
+ 		uint64_t len = round_page_64(rq->bytes), pa = 0;
+@@ -1159,10 +1195,27 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 				sweet_gpu_pool_free(pa, len);
+ 				return kIOReturnNoMemory;
+ 			}
++			uint64_t z0 = mach_absolute_time(), zns;
+ 			bzero((void *)km->getVirtualAddress(), len);
+ 			__asm__ volatile ("dsb sy" ::: "memory");
++			absolutetime_to_nanoseconds(mach_absolute_time() - z0, &zns);
++			mst.zero_ns += zns;
++			mst.zeroed += len;
+ 			km->release();
+ 		}
++		{
++			uint64_t ans;
++			absolutetime_to_nanoseconds(mach_absolute_time() - mst_t0, &ans);
++			mst.allocs++;
++			mst.big += len >= (8ULL << 20);
++			mst.bytes += len;
++			mst.reused += reused;
++			mst.alloc_ns += ans;
++			if (ans > mst.max_ns) {
++				mst.max_ns = ans;
++			}
++			mst_tick();
++		}
+ 		IOLockLock(fLock);
+ 		uint64_t h = 0;
+ 		IOReturn r = v2NewSlot(md, rq->bytes, false, &h);
+-- 
+2.43.0
+
