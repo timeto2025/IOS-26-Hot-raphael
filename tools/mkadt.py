@@ -16,6 +16,9 @@ import adt  # noqa: E402
 PHYS_BASE = 0xc0000000
 # --bt-addr AA:BB:..: the Bluetooth address MobileGestalt (Settings > About) and bluetoothd read
 BT_ADDR = bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4d])
+# --bt-node: an /arm-io/bluetooth node (--bt-transport N: its transport-encoding; D421AP's PCIe is 7)
+BT_NODE = False
+BT_TRANSPORT_ENCODING = 0
 MEM_SIZE = 0x3d000000
 # --highmem (phone only): above 4G. The flame live FDT memory node is
 # <0x80000000 0x3cc00000>, <0xc0000000 0x140000000>; every fixed
@@ -300,6 +303,20 @@ def build(seed=None, qemu=False, highmem=False, d22ap=False, canvas_height=2499,
             ('device_type', cstr('wlan')),
             ('compatible', cstr('flame,wcn3990')),
         ]),
+        # Bluetooth (raphael, BT_NODE): IONameMatch "bluetooth" (SpringBoard, Settings) and bluetoothd look for
+        # this node; as D421AP's /arm-io/bluetooth (n88, Apple vendor/product ids, profiles, coex) with the
+        # address from --bt-addr; the controller itself is reached by H4 on /dev/raphael-bt (BT_HCI_TRANSPORT).
+        *([node('bluetooth', [
+            ph(),
+            ('device_type', cstr('bluetooth')),
+            ('compatible', cstr('bluetooth,n88')),
+            ('vendor-id', u32(0x5ac)),
+            ('product-id', u32(0x12a0)),
+            ('supported-profiles', u32(0x2ffb)),
+            ('coex', u32(0x2)),
+            ('transport-encoding', u32(BT_TRANSPORT_ENCODING)),
+            ('local-mac-address', BT_ADDR),
+        ])] if BT_NODE else []),
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
@@ -423,6 +440,10 @@ if __name__ == '__main__':
         if arg == '--bt-addr' and idx + 1 < len(sys.argv):
             BT_ADDR = bytes(int(x, 16) for x in sys.argv[idx + 1].split(':'))
             assert len(BT_ADDR) == 6, 'need 6 bytes'
+        if arg == '--bt-node':
+            BT_NODE = True
+        if arg == '--bt-transport' and idx + 1 < len(sys.argv):
+            BT_TRANSPORT_ENCODING = int(sys.argv[idx + 1], 0)
         if arg == '--canvas-height' and idx + 1 < len(sys.argv):
             canvas_h = int(sys.argv[idx + 1])
         elif arg.startswith('--canvas-height='):

@@ -78,8 +78,10 @@ CANVAS_H=${CANVAS_H:-2436}
 [[ -n "${EXTRA_ARGS:-}" ]] && CMDLINE+=" $EXTRA_ARGS"
 # BT_ADDR=AA:BB:CC:DD:EE:FF: the Bluetooth address for Settings > About and bluetoothd (btup prints the
 # controller's: BD_ADDR); the default is a locally administered placeholder.
+if [[ -z "${BT:-}" ]]; then ls "$ROOT"/work/fw/bt/crbtfw*.tlv >/dev/null 2>&1 && BT=1 || BT=0; fi
 bt_addr_args=()
 [[ -n "${BT_ADDR:-}" ]] && bt_addr_args=(--bt-addr "$BT_ADDR")
+[[ "${BT:-0}" == 1 ]] && bt_addr_args+=(--bt-node --bt-transport "${BT_TRANSPORT_ENCODING:-0}")
 python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael --canvas-height "$CANVAS_H" "${bt_addr_args[@]}"
 
 overlay_args=(-o "$WORK/ios26-overlay-raphael.tar" --root-img "$ROOTIMG"
@@ -143,7 +145,6 @@ done
 [[ $n -gt 0 ]] && echo "Bluetooth: $n firmware file(s) staged at /var/local/fw/bt"
 # Daemons that only crash-loop on raphael (no Bluetooth driver yet, no SEP): STRIP_JOBS="" keeps them all.
 # BT=1 (default when work/fw/bt has the firmware): btup at boot and bluetoothd on /dev/raphael-bt (kernel 0168+).
-if [[ -z "${BT:-}" ]]; then ls "$ROOT"/work/fw/bt/crbtfw*.tlv >/dev/null 2>&1 && BT=1 || BT=0; fi
 if [[ "$BT" == 1 ]]; then
 	overlay_args+=(--bluetooth "${BT_TRANSPORT:-H4:POSIX:/dev/raphael-bt,115200}")
 	STRIP_JOBS=${STRIP_JOBS-com.apple.fairplayd.H2 com.apple.seputil}
