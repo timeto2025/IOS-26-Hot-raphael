@@ -151,7 +151,10 @@ static struct {
 
 static uint32_t next_cmd_token = 1u;
 static uint8_t  period_ready[ADSP_DMA_PERIODS];
-#define ADSP_MIN_QUEUED 1u
+#define ADSP_MIN_QUEUED      2u                        /* PLAY waits for data down to 40 ms queued */
+#define ADSP_IDLE_QUEUED     4u                        /* silence kept queued: 80 ms */
+#define ADSP_PREFILL_FRAMES  (2u * ADSP_PCM_PERIOD_FRAMES) /* 40 ms backlog before PLAY */
+enum { FEED_IDLE, FEED_PREFILL, FEED_PLAY };
 static uint64_t last_nonsilent_ms;
 static uint64_t last_voice_poll_ms;
 static uint64_t voice_retry_after_ms;
@@ -648,9 +651,6 @@ fill_period_pcm(int16_t *dst_stereo, uint32_t frames)
 		avail = 0;
 	}
 	uint32_t take = avail < frames ? avail : frames;
-	if (take < frames && avail > 0) {
-		g_status.underruns++;
-	}
 
 	for (uint32_t i = 0; i < take; i++) {
 		uint32_t idx = ((r + i) & mask) * 2u;
@@ -1372,30 +1372,65 @@ adsp_q6_tick(void)
 			last_w_change_ms = cur;
 		}
 	}
+	/*
+	 * Jitter buffer between the HAL (host clock, bursty) and the DSP (I2S clock).
+	 * IDLE:    HAL not playing; keep ADSP_IDLE_QUEUED periods of silence queued.
+	 * PREFILL: HAL started; keep feeding silence until ADSP_PREFILL_FRAMES are in the
+	 *          ring, so the backlog absorbs CoreAudio's bursts from then on.
+	 * PLAY:    only full periods; wait while >= ADSP_MIN_QUEUED are still queued.
+	 *          Running dry -> one silent period (counted) and back to PREFILL, never a
+	 *          half-filled period (the zero tail was the crackle).
+	 */
+	static int feed_state;
+	bool hal_active = g_shm != NULL &&
+	    (__atomic_load_n(&g_shm->speaker_running, __ATOMIC_ACQUIRE) != 0 || cur - last_w_change_ms < 250ULL);
 	for (uint32_t p = 0; p < ADSP_DMA_PERIODS; p++) {
 		if (!period_ready[p]) {
 			continue;
 		}
-		/*
-		 * Pacing: while the HAL is actively writing, never hand the DSP a half-empty
-		 * period (the zero-filled tail is an audible click). Wait for a full period
-		 * as long as at least ADSP_MIN_QUEUED periods (20 ms) are still queued.
-		 * "Writing" = the HAL's IO is running (speaker_running), or it wrote in the
-		 * last 250 ms: CoreAudio writes in bursts, a 60 ms window was too short.
-		 */
-		if (tone_frames_left == 0 && g_shm != NULL &&
-		    (__atomic_load_n(&g_shm->speaker_running, __ATOMIC_ACQUIRE) != 0 ||
-		    cur - last_w_change_ms < 250ULL)) {
+		bool send_silence = false;
+		if (tone_frames_left == 0 && g_shm != NULL) {
 			uint32_t avail = __atomic_load_n(&g_shm->write_frames, __ATOMIC_ACQUIRE) -
 			    __atomic_load_n(&g_shm->read_frames, __ATOMIC_RELAXED);
 			unsigned queued = 0;
 			for (uint32_t q = 0; q < ADSP_DMA_PERIODS; q++) {
 				queued += period_ready[q] ? 0u : 1u;
 			}
-			if (avail < ADSP_PCM_PERIOD_FRAMES && avail <= HOT_AUDIO_RING_FRAMES &&
-			    queued >= ADSP_MIN_QUEUED) {
-				break;
+			if (avail > HOT_AUDIO_RING_FRAMES) {
+				avail = 0;      /* overrun: fill_period_pcm resynchronises */
 			}
+			if (!hal_active) {
+				feed_state = FEED_IDLE;
+				if (avail == 0) {
+					if (queued >= ADSP_IDLE_QUEUED) {
+						break;
+					}
+					send_silence = true;
+				}
+			} else {
+				if (feed_state != FEED_PLAY) {
+					feed_state = avail >= ADSP_PREFILL_FRAMES ? FEED_PLAY : FEED_PREFILL;
+				}
+				if (feed_state == FEED_PREFILL) {
+					if (queued >= ADSP_IDLE_QUEUED) {
+						break;
+					}
+					send_silence = true;
+				} else if (avail < ADSP_PCM_PERIOD_FRAMES) {
+					if (queued >= ADSP_MIN_QUEUED) {
+						break;
+					}
+					g_status.underruns++;
+					feed_state = FEED_PREFILL;
+					send_silence = true;
+				}
+			}
+		}
+		if (send_silence) {
+			memset(pcm_buf, 0, sizeof(pcm_buf));
+			(void)pm_wr(ADSP_DMA_PA + (uint64_t)p * ADSP_DMA_PERIOD_ALLOC, pcm_buf, ADSP_PCM_PERIOD_BYTES);
+			(void)q6_send_period_write(p);
+			continue;
 		}
 		bool signal = fill_period_pcm(pcm_buf, ADSP_PCM_PERIOD_FRAMES);
 		uint64_t pa = ADSP_DMA_PA + (uint64_t)p * ADSP_DMA_PERIOD_ALLOC;
