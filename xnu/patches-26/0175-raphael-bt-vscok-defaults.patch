@@ -1,0 +1,57 @@
+From 11a9c4fad4c6e6eabf4777d25082a75af1e0af91 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 13:00:26 +0300
+Subject: [PATCH] raphael BT: vendor answers up to 250 bytes; defaults
+ fce2.3,fe37,fe29,fe3b.250 (bluetoothd's LE scan start)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index 9f6d0af..86477af 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -770,7 +770,7 @@ static unsigned bt_nvscok;
+ static void
+ bt_vscok_parse(void)
+ {
+-	char buf[128] = "fce2";
++	char buf[128] = "fce2.3,fe37,fe29,fe3b.250";
+ 	(void)PE_parse_boot_arg_str("raphbtvscok", buf, sizeof(buf));
+ 	for (const char *c = buf; *c && bt_nvscok < 16;) {
+ 		unsigned op = 0, n = 0, k = 0;
+@@ -786,7 +786,7 @@ bt_vscok_parse(void)
+ 		if (*c == ',') {
+ 			c++;
+ 		}
+-		if (op != 0 && n <= 64) {
++		if (op != 0 && n <= 250) {
+ 			bt_vscok[bt_nvscok].op = (uint16_t)op;
+ 			bt_vscok[bt_nvscok].extra = (uint8_t)n;
+ 			bt_nvscok++;
+@@ -996,14 +996,16 @@ bt_ctl_send(kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mbuf_t m,
+ 			 */
+ 			/*
+ 			 * Status per opcode: raphbtvscok=OPCODE[.N],... (hex opcode, N extra zero bytes after the selector;
+-			 * default "fce2": the Olympic commands must succeed, BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS times out
+-			 * otherwise) get status 0; the rest status 1, which bluetoothd takes as "not supported". Status 0
++			 * default "fce2.3,fe37,fe29,fe3b.250": the Olympic commands (4-byte selector echoed) must succeed or
++			 * BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS times out; LE scan parameters/enable (fe37, fe29) must succeed or
++			 * bluetoothd restarts ("Scan stopped improperly with result 701"); fe3b's answer is read as a run of
++			 * 32-bit fields, more than 64 bytes (bcm_vsc.c:1017..1036 AssertFail)) get status 0; the rest status 1, which bluetoothd takes as "not supported". Status 0
+ 			 * for everything (raphbtvsc=2) aborts bluetoothd in bcm_vsc.c on READ_PROP_LOCAL_FEATURES, whose
+ 			 * answer must then carry at least 4 bytes.
+ 			 */
+ 			uint16_t op = (uint16_t)(d[1] | d[2] << 8);
+ 			int ok = bt.vsc == 2 ? 0 : bt_vscok_find(op);
+-			uint8_t ev[7 + 1 + 64];
++			uint8_t ev[7 + 1 + 250];
+ 			bzero(ev, sizeof(ev));
+ 			ev[0] = 4;
+ 			ev[1] = 0x0e;
+-- 
+2.43.0
+

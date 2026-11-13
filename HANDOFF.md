@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 13:05 MSK: kernel 0175 (bluetoothd reaches the LE scan start)
+- With 0174 and EXTRA_ARGS raphbtvscok=...: fce2.3 (4-byte Olympic selector) -> "STACK_READY/StackStarted";
+  then the LE scan start: fe37 (scan params) and fe29 (scan enable) must succeed ("Scan stopped improperly with
+  result 701 -- restart" otherwise), fe3b must succeed with data: AssertFail bcm_vsc.c:1017/1018/1021/1036
+  `ByteStream_NumReadBytesAvail >= 4` with 1/4/16/64 bytes.
+- 0175: up to 250 extra bytes; default raphbtvscok=fce2.3,fe37,fe29,fe3b.250 (no EXTRA_ARGS needed).
+- Open: these scan commands are answered by the kernel, the WCN3998 does not scan yet (map fe37/fe29 onto
+  LE Set Scan Parameters/Enable later). Other failing VSCs are tolerated (match tables, PCF filters, 0xfce9).
+
 ### raphael, 2026-11-13 06:40 MSK: kernel 0174 (vendor command status per opcode)
 - 0173 + raphbtvsc=2 (all vendor commands status 0 + selector): "Stack initialization complete", bluetoothd takes the
   controller for a BCM_4378 and lists its VSCs, "Done starting up stack", then READ_PROP_LOCAL_FEATURES (0xfdda)
