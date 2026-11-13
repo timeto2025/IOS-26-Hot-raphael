@@ -195,42 +195,27 @@ load(const char *path, size_t *len)
  */
 static uint8_t nvm_rate_idx;
 
-/* The tags start right after the TLV header (type 2) or 4 bytes later (raphael's crnv21.bin: type 4, header
- * 04 62 12 00 then 02 2b 0e 00): whichever start walks the tags to the end of the file. */
-static size_t
-nvm_tags_start(const uint8_t *d, size_t len)
-{
-	for (int k = 0; k < 2; k++) {
-		size_t start = (d[0] == 4) == (k == 0) ? 8 : 4;
-		size_t idx = start;
-		unsigned n = 0;
-		while (idx + 12 <= len) {
-			unsigned tl = d[idx + 2] | d[idx + 3] << 8;
-			if (idx + 12 + tl > len) {
-				break;
-			}
-			idx += 12 + tl;
-			n++;
-		}
-		if (n > 2 && len - idx < 4) {
-			return start;
-		}
-	}
-	return 0;
-}
-
+/*
+ * Where the tags are: right after the TLV header (type 2), or after a nested TLV header (raphael's crnv21.bin:
+ * 04 62 12 00, then 02 2b 0e 00: a type-2 TLV of 0xe2b bytes inside). The tags run to the end of that TLV.
+ */
 static void
 nvm_fixup(uint8_t *d, size_t len)
 {
-	size_t idx = len >= 4 ? nvm_tags_start(d, len) : 0;
-	if (!idx) {
-		printf("btup: NVM: tags not found (header %02x %02x %02x %02x): sent as it is\n", d[0], d[1], d[2], d[3]);
-		return;
+	size_t start = 4, end = len;
+	if (len >= 8 && d[0] == 4 && d[4] == 2) {
+		start = 8;
+		end = 8 + (size_t)(d[5] | d[6] << 8 | d[7] << 16);
+		if (end > len) {
+			end = len;
+		}
 	}
-	while (idx + 12 <= len) {
+	int seen17 = 0;
+	size_t idx = start;
+	while (idx + 12 <= end) {
 		unsigned id = d[idx] | d[idx + 1] << 8, tl = d[idx + 2] | d[idx + 3] << 8;
 		uint8_t *data = d + idx + 12;
-		if (idx + 12 + tl > len) {
+		if (idx + 12 + tl > end) {
 			break;
 		}
 		if (id == 17 && tl >= 3) {
@@ -238,11 +223,15 @@ nvm_fixup(uint8_t *d, size_t len)
 			    data[0] & 0x7f, nvm_rate_idx);
 			data[0] &= 0x7f;
 			data[2] = nvm_rate_idx;
+			seen17 = 1;
 		} else if (id == 2 && tl >= 6) {
 			printf("btup: NVM tag 2 (BD address): %02x:%02x:%02x:%02x:%02x:%02x\n", data[5], data[4], data[3],
 			    data[2], data[1], data[0]);
 		}
 		idx += 12 + tl;
+	}
+	if (!seen17) {
+		printf("btup: NVM: no tag 17 (header %02x %02x %02x %02x): sent as it is\n", d[0], d[1], d[2], d[3]);
 	}
 }
 
