@@ -15,6 +15,8 @@ on:
     paths:
       - "phone/wifi/**"
       - "phone/bt/**"
+      - "phone/adsp/**"
+      - "phone/audio/**"
       - ".github/workflows/raphael-tools.yml"
 
 concurrency:
@@ -44,6 +46,20 @@ jobs:
           codesign -f -s - phone/bt/out/btup phone/bt/out/put phone/bt/out/bluetool || true
           file phone/bt/out/btup
 
+      - name: adspd (raphael audio) + HotAudio.driver
+        run: |
+          set -e
+          mkdir -p phone/adsp/out
+          cd phone/adsp
+          ../../work/userland/bin/ios-cc -O2 -Wall -Wextra -Wno-four-char-constants -Wno-unused-parameter \
+            -DADSP_BOARD_RAPHAEL -Wl,-dead_strip \
+            -o out/adspd adspd.c adsp_hw.c tfa9874.c adsp_glink.c adsp_q6.c
+          strip -x out/adspd
+          codesign -f -s - --entitlements adspd-ents.plist out/adspd
+          cd ../..
+          sh phone/audio/build.sh
+          file phone/adsp/out/adspd
+
       - name: dash (/bin/sh)
         run: |
           set -e
@@ -71,6 +87,8 @@ jobs:
           mkdir -p dist/bin
           cp phone/wifi/out/wland dist/bin/
           cp phone/bt/out/btup phone/bt/out/put phone/bt/out/bluetool dist/bin/
+          cp phone/adsp/out/adspd dist/bin/
+          mkdir -p dist/HAL && cp -R phone/audio/out/HotAudio.driver dist/HAL/
           cp work/userland/src/dash-0.5.12/src/dash dist/bin/
           tar czf raphael-tools.tar.gz -C dist .
           tar tzvf raphael-tools.tar.gz

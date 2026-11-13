@@ -1,15 +1,17 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * adspd.c: Main daemon & CLI entrypoint for RMX1931 SM8150 LPASS ADSP audio
- * and Maxim MAX98927L/R stereo speaker + cellular voice call routing.
+ * adspd.c: Main daemon & CLI entrypoint for SM8150 LPASS ADSP audio:
+ * RMX1931 (Maxim MAX98927L/R stereo) or, built with -DADSP_BOARD_RAPHAEL,
+ * Redmi K20 Pro (NXP TFA9874 mono), plus cellular voice call routing.
  *
  * Usage:
  *   adspd [auto|up]     Boot ADSP, bring up Q6AFE/ADM/ASM + MAX98927, stream PCM
  *   adspd status        Show /var/local/adsp-status.json & /tmp/hot-audio.shm
  *   adspd tone [ms]     Play stereo C5+E5 test chime (via running daemon or standalone)
  *   adspd voice-test    Verify live Q6Voice (MVM/CVS/CVP) bringup & media resume
- *   adspd i2c-scan      Reset MAX98927L/R and scan SOUTH gpio51/52 I2C bus
+ *   adspd i2c-scan      Reset the speaker amp(s) and scan their I2C bus
+ *   adspd amp ...       Amplifier CLI (raphael: tfa dump|r|w|init|on|off)
  *   adspd shutdown      Cleanly stop adspd and run PAS_SHUTDOWN(1) + QMP off
  */
 #include <errno.h>
@@ -478,13 +480,7 @@ cmd_i2c_scan(void)
 	if (pm_open_dev() != 0) {
 		return 1;
 	}
-	/* Pulse active-low resets on MAX98927L (SOUTH 148) & MAX98927R (NORTH 37) */
-	tlmm_gpio_drive(TLMM_SOUTH_PA, GPIO_MAX98927L_RESET, 0);
-	tlmm_gpio_drive(TLMM_NORTH_PA, GPIO_MAX98927R_RESET, 0);
-	usleep(1500);
-	tlmm_gpio_drive(TLMM_SOUTH_PA, GPIO_MAX98927L_RESET, 1);
-	tlmm_gpio_drive(TLMM_NORTH_PA, GPIO_MAX98927R_RESET, 1);
-	usleep(6000);
+	spk_amp_hw_reset();
 	spk_i2c_scan_bus();
 	return 0;
 }
@@ -789,6 +785,12 @@ main(int argc, char **argv)
 	if (strcmp(cmd, "i2c-scan") == 0) {
 		return cmd_i2c_scan();
 	}
+	if (strcmp(cmd, "amp") == 0 || strcmp(cmd, "tfa") == 0) {
+		if (pm_open_dev() != 0) {
+			return 1;
+		}
+		return spk_amp_cli(argc - 2, argv + 2);
+	}
 	if (strcmp(cmd, "shutdown") == 0) {
 		return cmd_shutdown();
 	}
@@ -833,6 +835,6 @@ main(int argc, char **argv)
 	}
 
 	fprintf(stderr,
-	    "usage: adspd [auto | up | status | tone [ms] | voice-test [ms] | i2c-scan | shutdown]\n");
+	    "usage: adspd [auto | up | status | tone [ms] | voice-test [ms] | i2c-scan | amp ... | shutdown]\n");
 	return 2;
 }

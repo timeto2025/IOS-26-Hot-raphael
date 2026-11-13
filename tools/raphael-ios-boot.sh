@@ -9,7 +9,7 @@
 #                   already written to the phone's `darwin` partition
 # STOCK_BOOT_IMG    this phone's boot.img, or the HackiOS package's images/twrp-static-base.img
 #
-# Root on darwin, writable; Wi-Fi, cellular and audio off (no raphael drivers yet).
+# Root on darwin, writable; Wi-Fi (WIFI=1), Bluetooth (BT=1) and audio (AUDIO=1) opt-in, cellular off.
 # USB Ethernet debugging on by default (sweetusb=2: phone 192.168.7.2, host 192.168.7.1,
 # tools/hot-dbg.py on TCP 2223); USB=0 turns it off. SSH (dropbear, root@192.168.7.2:22)
 # with SSHKEY=FILE.pub, default ~/.ssh/id_ed25519.pub when it exists.
@@ -157,6 +157,19 @@ for j in $STRIP_JOBS; do overlay_args+=(--strip-job "$j"); done
 # (com.apple.audio.hapticd: Settings > Bluetooth hung 12 s in CoreHaptics and was killed). DROP_MACH="" keeps them.
 DROP_MACH=${DROP_MACH-com.apple.audio.hapticd}
 for m in $DROP_MACH; do overlay_args+=(--drop-mach-service "$m"); done
+# AUDIO=1: speaker through adspd (LPASS ADSP from /var/local/fw/modem/adsp.*, QUAT MI2S SD0 24-bit, TFA9874
+# on qup1 i2c) and the HotAudio HAL plug-in. Needs the raphael adspd from EXTRA_USERLAND (raphael-tools) and
+# work/fw/audio/tfa98xx.cnt (this phone's /vendor/firmware/tfa98xx.cnt; never in git).
+if [[ "${AUDIO:-0}" == 1 ]]; then
+	grep -aq "tfa9874" "$WORK/userland/bin/adspd" 2>/dev/null || {
+		echo "error: AUDIO=1 needs the raphael adspd (EXTRA_USERLAND=raphael-tools.tar.gz)" >&2
+		exit 1
+	}
+	[[ -s "$ROOT/work/fw/audio/tfa98xx.cnt" ]] || { echo "error: work/fw/audio/tfa98xx.cnt missing" >&2; exit 1; }
+	overlay_args+=(--enable-adsp --extra "$ROOT/work/fw/audio/tfa98xx.cnt:private/var/local/fw/audio/tfa98xx.cnt:0644")
+	[[ -d "$WORK/userland/HAL/HotAudio.driver" ]] || echo "Audio: warning: no HAL/HotAudio.driver in the userland"
+	echo "Audio: adspd + TFA9874 container staged"
+fi
 # MTL2_CLIENTS='* -chronod ...' (spaces or newlines): which processes get HotMetal2 (/var/local/mtl2-clients);
 # default as upstream: everyone but chronod, cameracaptured, WidgetRenderer_Default and PosterBoard.
 if [[ -n "${MTL2_CLIENTS:-}" ]]; then

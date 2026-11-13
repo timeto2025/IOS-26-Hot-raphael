@@ -1468,7 +1468,7 @@ tlmm_gpio_drive(uint64_t tile_pa, unsigned pin, int high)
 	wr32(GPIO_IO_PA(tile_pa, pin), high ? 2u : 0u);
 }
 
-/* Open-drain bit-banged I2C on SOUTH GPIO51 (SDA) & GPIO52 (SCL) (~80 kHz) */
+/* Open-drain bit-banged I2C on SOUTH GPIO_SPK_I2C_SDA/SCL (~80 kHz) */
 #define SDA_CFG_PA GPIO_CFG_PA(TLMM_SOUTH_PA, GPIO_SPK_I2C_SDA)
 #define SDA_IO_PA  GPIO_IO_PA(TLMM_SOUTH_PA, GPIO_SPK_I2C_SDA)
 #define SCL_CFG_PA GPIO_CFG_PA(TLMM_SOUTH_PA, GPIO_SPK_I2C_SCL)
@@ -1689,16 +1689,76 @@ spk_i2c_read_reg16(uint8_t addr7, uint16_t reg, uint8_t *val)
 	return rc;
 }
 
+int
+spk_i2c_write8_16(uint8_t addr7, uint8_t reg, uint16_t val)
+{
+	int rc = -1;
+
+	i2c_bus_acquire();
+	i2c_start_cond();
+	if (i2c_tx_byte((uint8_t)(addr7 << 1)) == 0 &&
+	    i2c_tx_byte(reg) == 0 &&
+	    i2c_tx_byte((uint8_t)(val >> 8)) == 0 &&
+	    i2c_tx_byte((uint8_t)(val & 0xffu)) == 0) {
+		rc = 0;
+	}
+	i2c_stop_cond();
+	i2c_bus_release();
+	return rc;
+}
+
+int
+spk_i2c_read8_16(uint8_t addr7, uint8_t reg, uint16_t *val)
+{
+	int rc = -1;
+
+	i2c_bus_acquire();
+	i2c_start_cond();
+	if (i2c_tx_byte((uint8_t)(addr7 << 1)) == 0 &&
+	    i2c_tx_byte(reg) == 0) {
+		i2c_start_cond();
+		if (i2c_tx_byte((uint8_t)((addr7 << 1) | 1u)) == 0) {
+			uint8_t hi = i2c_rx_byte(1);
+			uint8_t lo = i2c_rx_byte(0);
+			*val = (uint16_t)((hi << 8) | lo);
+			rc = 0;
+		}
+	}
+	i2c_stop_cond();
+	i2c_bus_release();
+	return rc;
+}
+
+unsigned
+adsp_i2s_bits(void)
+{
+	static unsigned bits;
+
+	if (bits == 0) {
+		const char *e = getenv("ADSPD_I2S_BITS");
+		unsigned v = e != NULL ? (unsigned)strtoul(e, NULL, 0) : 0u;
+		bits = (v == 16u || v == 24u || v == 32u) ? v : ADSP_I2S_BITS_DEFAULT;
+	}
+	return bits;
+}
+
 void
 spk_i2c_scan_bus(void)
 {
-	printf("i2c-scan on SOUTH gpio51(SDA)/gpio52(SCL):\n");
+	printf("i2c-scan on " SPK_I2C_NAME ":\n");
 	for (uint8_t a = 0x08; a <= 0x77; a++) {
 		if (spk_i2c_probe7(a) == 0) {
+#ifdef ADSP_BOARD_RAPHAEL
+			uint16_t rev = 0;
+			int rr = spk_i2c_read8_16(a, 0x03, &rev);
+			printf("  found 0x%02x (reg 0x03 -> %s 0x%04x)\n",
+			    a, rr == 0 ? "ok" : "err", rev);
+#else
 			uint8_t rev = 0;
 			int rr = spk_i2c_read_reg16(a, 0x01ff, &rev);
 			printf("  found 0x%02x (reg 0x01ff -> %s 0x%02x)\n",
 			    a, rr == 0 ? "ok" : "err", rev);
+#endif
 		}
 	}
 }

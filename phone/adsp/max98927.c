@@ -92,8 +92,8 @@ static const struct {
 	{ 0x0081, 0x03 },
 };
 
-static void
-max98927_hw_reset_both(void)
+void
+spk_amp_hw_reset(void)
 {
 	/* Active-low hardware reset on MAX98937L (SOUTH gpio148) & MAX98937R (NORTH gpio37) */
 	tlmm_gpio_drive(TLMM_SOUTH_PA, GPIO_MAX98927L_RESET, 0);
@@ -155,9 +155,9 @@ max98927_init_one(uint8_t addr7, bool is_right, uint8_t *rev_out)
 }
 
 int
-max98927_init_stereo(void)
+spk_amp_init(void)
 {
-	max98927_hw_reset_both();
+	spk_amp_hw_reset();
 	g_status.amp_left_ok =
 	    (max98927_init_one(MAX98927L_I2C_ADDR, false, &g_status.amp_left_rev) == 0);
 	g_status.amp_right_ok =
@@ -169,7 +169,7 @@ max98927_init_stereo(void)
 }
 
 int
-max98927_set_enable(bool enable)
+spk_amp_set_enable(bool enable)
 {
 	bool enable_left = enable;
 	bool enable_right = enable && (!cur_voice_call || cur_speakerphone);
@@ -191,7 +191,7 @@ max98927_set_enable(bool enable)
 }
 
 int
-max98927_set_voice_mode(bool voice_call, bool speakerphone)
+spk_amp_set_voice_mode(bool voice_call, bool speakerphone)
 {
 	cur_voice_call = voice_call;
 	cur_speakerphone = speakerphone;
@@ -225,8 +225,17 @@ max98927_set_voice_mode(bool voice_call, bool speakerphone)
 			    MAX98937_R0036_AMP_VOL_CTRL, MAX98937_DIG_VOL_SPK);
 		}
 		if (voice_call && speakerphone) {
-			(void)max98927_set_enable(true);
+			(void)spk_amp_set_enable(true);
 		}
 	}
 	return 0;
+}
+
+int
+spk_amp_cli(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	fprintf(stderr, "amp: no CLI for MAX98937 (use i2c-scan)\n");
+	return 2;
 }

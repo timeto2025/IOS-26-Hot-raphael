@@ -24,8 +24,14 @@
 
 /* ---- SM8150 LPASS / ADSP hardware constants ---- */
 #define PAS_ADSP                    1u
+#ifdef ADSP_BOARD_RAPHAEL
+/* Redmi K20 Pro: pil_adsp_region (raphael DT); RMX's 0x9b200000 is cont_splash here */
+#define ADSP_CARVEOUT_PA            0x8be00000ULL
+#define ADSP_CARVEOUT_SIZE          0x02200000ULL /* 34 MiB */
+#else
 #define ADSP_CARVEOUT_PA            0x9b200000ULL
 #define ADSP_CARVEOUT_SIZE          0x01e00000ULL /* 30 MiB */
+#endif
 
 /*
  * Uncached <4 GiB HLOS DRAM audio DMA pool at 0xC3800000 (56 MiB inside the
@@ -101,6 +107,19 @@
 #define GPIO_QUAT_MI2S_DATA0        139u /* SOUTH, func 1 (DIN / SD0) */
 #define GPIO_QUAT_MI2S_DATA1        140u /* SOUTH, func 1 (DOUT / SD1) */
 
+#ifdef ADSP_BOARD_RAPHAEL
+/* Redmi K20 Pro: TFA9874 on qup1 i2c (884000.i2c) @0x34, reset gpio59, irq gpio141 */
+#define GPIO_SPK_I2C_SDA            114u /* SOUTH (qup1 SDA) */
+#define GPIO_SPK_I2C_SCL            115u /* SOUTH (qup1 SCL) */
+#define GPIO_TFA9874_RESET          59u  /* SOUTH, active-high by default */
+#define TFA9874_I2C_ADDR            0x34u
+#define TFA9874_CNT_PATH            "/var/local/fw/audio/tfa98xx.cnt"
+/* Speaker on QUAT_MI2S_RX SD0, 24-bit backend like Android (audio_platform_info.xml) */
+#define AFE_RX_SD_LINE              0x0001u /* AFE_PORT_I2S_SD0 */
+#define AFE_TX_SD_LINE              0x0002u /* AFE_PORT_I2S_SD1 */
+#define ADSP_I2S_BITS_DEFAULT       24u
+#define SPK_I2C_NAME                "SOUTH gpio114(SDA)/gpio115(SCL)"
+#else
 #define GPIO_SPK_I2C_SDA            51u  /* SOUTH (qup4_i2c SDA) */
 #define GPIO_SPK_I2C_SCL            52u  /* SOUTH (qup4_i2c SCL) */
 #define GPIO_MAX98927L_RESET        148u /* SOUTH, active-low */
@@ -108,6 +127,11 @@
 
 #define MAX98927L_I2C_ADDR          0x39u
 #define MAX98927R_I2C_ADDR          0x3au
+#define AFE_RX_SD_LINE              0x0002u /* AFE_PORT_I2S_SD1 */
+#define AFE_TX_SD_LINE              0x0001u /* AFE_PORT_I2S_SD0 */
+#define ADSP_I2S_BITS_DEFAULT       16u
+#define SPK_I2C_NAME                "SOUTH gpio51(SDA)/gpio52(SCL)"
+#endif
 
 /* ---- Daemon runtime telemetry (/var/local/adsp-status.json) ---- */
 struct adsp_status {
@@ -184,12 +208,17 @@ void     tlmm_gpio_drive(uint64_t tile_pa, unsigned pin, int high);
 int      spk_i2c_read_reg16(uint8_t addr7, uint16_t reg, uint8_t *val);
 int      spk_i2c_write_reg16(uint8_t addr7, uint16_t reg, uint8_t val);
 int      spk_i2c_probe7(uint8_t addr7);
+int      spk_i2c_write8_16(uint8_t addr7, uint8_t reg, uint16_t val);
+int      spk_i2c_read8_16(uint8_t addr7, uint8_t reg, uint16_t *val);
 void     spk_i2c_scan_bus(void);
+unsigned adsp_i2s_bits(void);     /* AFE/ADM bit width: 16 or 24 (env ADSPD_I2S_BITS) */
 
-/* ---- Maxim MAX98927L/R stereo amplifier (max98927.c) ---- */
-int      max98927_init_stereo(void);
-int      max98927_set_enable(bool enable);
-int      max98927_set_voice_mode(bool voice_call, bool speakerphone);
+/* ---- Speaker amplifier: max98927.c (RMX1931) or tfa9874.c (raphael) ---- */
+void     spk_amp_hw_reset(void);
+int      spk_amp_init(void);
+int      spk_amp_set_enable(bool enable);
+int      spk_amp_set_voice_mode(bool voice_call, bool speakerphone);
+int      spk_amp_cli(int argc, char **argv);
 
 /* ---- Multi-channel GLINK + QRTR pd-mapper/tftp + FastRPC audiopd (adsp_glink.c) ---- */
 int      adsp_glink_prepare(void);

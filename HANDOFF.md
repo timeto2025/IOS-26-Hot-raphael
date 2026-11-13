@@ -5,6 +5,17 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 17:30 MSK: audio step 1 (adspd for raphael + own TFA9874 driver), untested
+- phone/adsp builds per board: -DADSP_BOARD_RAPHAEL (raphael-tools workflow) uses ADSP carve-out
+  0x8be00000+0x2200000 (pil_adsp_region; RMX's 0x9b200000 is cont_splash here), QUAT_MI2S_RX on SD0, AFE/ADM
+  24-bit (IBIT 3.072 MHz, env ADSPD_I2S_BITS=16 for 1.536 MHz) and phone/adsp/tfa9874.c instead of max98927.c.
+- tfa9874.c (MIT, own code): bit-banged I2C SOUTH gpio114/115 @0x34, reset gpio59 (active high, TFA_RESET_POL),
+  I2CR -> keys 0x0F/0xA0/0xA1 -> per-revision values (0x0a74/0b74/0c74) -> tfa98xx.cnt device list ->
+  profile "speaker" up to its default section -> MANSCONF, PWDN=0, wait CLKS -> AMPE on play. Register-patch
+  descriptors read at offset +2 (TFA_REG_OFS). CLI: adspd tfa dump|r|w|init|on|off|status; adspd i2c-scan.
+- Image: AUDIO=1 -> --enable-adsp + work/fw/audio/tfa98xx.cnt at /var/local/fw/audio; HotAudio.driver from
+  raphael-tools (HAL/). Open: does the PAS boot accept the raphael adsp.mdt at 0x8be00000, CLKS with 24-bit.
+
 ### raphael, 2026-11-13 16:55 MSK: kernel 0176 (real LE scan, tearing counters)
 - raphbtscan=1 (default): on 0xfe29 enable the kernel sends LE Set Scan Parameters (passive, fe37's main-core
   interval/window) + LE Set Scan Enable (dup filter) to the WCN3998 and swallows their Command Complete; disable

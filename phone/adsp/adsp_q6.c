@@ -483,7 +483,7 @@ q6afe_start_i2s_port(uint16_t port_id, uint16_t sd_line_mode, uint16_t mono_ster
 		.param_id              = AFE_PARAM_ID_I2S_CONFIG,
 		.param_size            = 128u,
 		.i2s_cfg_minor_version = 1u,
-		.bit_width             = 16u,
+		.bit_width             = (uint16_t)adsp_i2s_bits(),
 		.channel_mode          = sd_line_mode,
 		.mono_stereo           = mono_stereo,
 		.ws_src                = 1u, /* internal master WS */
@@ -509,8 +509,8 @@ q6afe_start_i2s_port(uint16_t port_id, uint16_t sd_line_mode, uint16_t mono_ster
 	if (apr_call(APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START, &start, sizeof(start), 0, NULL) != 0) {
 		return -1;
 	}
-	adsp_log("q6afe: port 0x%04x started (sd_mode=%u stereo=%u 48kHz 16-bit)",
-	    port_id, sd_line_mode, mono_stereo);
+	adsp_log("q6afe: port 0x%04x started (sd_mode=%u stereo=%u 48kHz %u-bit)",
+	    port_id, sd_line_mode, mono_stereo, adsp_i2s_bits());
 	return 0;
 }
 
@@ -705,7 +705,7 @@ q6_open_media_stream(void)
 		.endpoint_id_2       = 0xffffu,
 		.topology_id         = ADM_DEFAULT_COPP_TOPOLOGY,
 		.dev_num_channel     = HAKIOS_AUDIO_CHANNELS,
-		.bit_width           = 16u,
+		.bit_width           = (uint16_t)adsp_i2s_bits(),
 		.sample_rate         = HAKIOS_AUDIO_RATE,
 		.dev_channel_mapping = { 1, 2, 0, 0, 0, 0, 0, 0 },
 	};
@@ -1082,7 +1082,7 @@ q6_voice_start(bool speakerphone)
 	q6_close_media_stream();
 
 	/* Start clocked QUAT_MI2S_TX (0x1007 SD0 mono) for CVP TX; fallback to PSEUDOPORT_01 */
-	if (q6afe_start_i2s_port(AFE_PORT_ID_QUATERNARY_MI2S_TX, AFE_PORT_I2S_SD0, 0) == 0) {
+	if (q6afe_start_i2s_port(AFE_PORT_ID_QUATERNARY_MI2S_TX, AFE_TX_SD_LINE, 0) == 0) {
 		afe_tx_running = true;
 		voice_tx_port = AFE_PORT_ID_QUATERNARY_MI2S_TX;
 	} else {
@@ -1178,7 +1178,7 @@ q6_voice_start(bool speakerphone)
 	g_status.voice_active = true;
 	g_status.voice_speakerphone = speakerphone;
 	snprintf(g_status.state, sizeof(g_status.state), "voice_call");
-	(void)max98927_set_voice_mode(true, speakerphone);
+	(void)spk_amp_set_voice_mode(true, speakerphone);
 	adsp_log("q6voice: active (mvm=0x%x cvs=0x%x cvp=0x%x)", mvm_h, cvs_h, cvp_h);
 	adsp_status_write();
 	return 0;
@@ -1246,8 +1246,8 @@ q6_voice_stop(void)
 	g_status.voice_active = false;
 	g_status.voice_speakerphone = false;
 
-	(void)max98927_set_voice_mode(false, false);
-	(void)max98927_set_enable(false);
+	(void)spk_amp_set_voice_mode(false, false);
+	(void)spk_amp_set_enable(false);
 	(void)q6_open_media_stream();
 	adsp_status_write();
 }
@@ -1281,7 +1281,7 @@ adsp_q6_bringup_playback(void)
 	{
 		int clk_rc = -1;
 		for (int attempt = 0; attempt < 8 && !g_stop_requested; attempt++) {
-			clk_rc = q6afe_set_quad_mi2s_clk(1536000u);
+			clk_rc = q6afe_set_quad_mi2s_clk(HAKIOS_AUDIO_RATE * 2u * (adsp_i2s_bits() == 16u ? 16u : 32u));
 			if (clk_rc == 0) {
 				break;
 			}
@@ -1291,7 +1291,7 @@ adsp_q6_bringup_playback(void)
 			adsp_log("q6afe: warning: QUAD_MI2S_IBIT clock set returned error, continuing");
 		}
 	}
-	if (q6afe_start_i2s_port(AFE_PORT_ID_QUATERNARY_MI2S_RX, AFE_PORT_I2S_SD1, 1) != 0) {
+	if (q6afe_start_i2s_port(AFE_PORT_ID_QUATERNARY_MI2S_RX, AFE_RX_SD_LINE, 1) != 0) {
 		snprintf(g_status.last_error, sizeof(g_status.last_error), "Q6AFE 0x1006 start failed");
 		return -1;
 	}
@@ -1299,7 +1299,7 @@ adsp_q6_bringup_playback(void)
 	adsp_status_write();
 
 	/* Initialize MAX98937L@0x39 & MAX98937R@0x3a while I2S BCLK/WS are live */
-	if (max98927_init_stereo() != 0) {
+	if (spk_amp_init() != 0) {
 		adsp_log("max98937: warning: neither 0x39 nor 0x3a responded to probe");
 	}
 	adsp_status_write();
@@ -1351,7 +1351,7 @@ adsp_q6_tick(void)
 		} else if (want_voice && g_status.voice_active &&
 		    want_spk != g_status.voice_speakerphone) {
 			g_status.voice_speakerphone = want_spk;
-			(void)max98927_set_voice_mode(true, want_spk);
+			(void)spk_amp_set_voice_mode(true, want_spk);
 			adsp_status_write();
 		}
 	}
@@ -1373,21 +1373,21 @@ adsp_q6_tick(void)
 		if (signal) {
 			last_nonsilent_ms = cur;
 			if (!g_status.amp_enabled) {
-				(void)max98927_set_enable(true);
+				(void)spk_amp_set_enable(true);
 			}
 		}
 	}
 
 	if (g_status.amp_enabled && last_nonsilent_ms != 0 &&
 	    cur - last_nonsilent_ms > AMP_SILENCE_SHUTOFF_MS) {
-		(void)max98927_set_enable(false);
+		(void)spk_amp_set_enable(false);
 	}
 }
 
 void
 adsp_q6_teardown(void)
 {
-	(void)max98927_set_enable(false);
+	(void)spk_amp_set_enable(false);
 	if (g_status.voice_active) {
 		q6_voice_stop();
 	}
