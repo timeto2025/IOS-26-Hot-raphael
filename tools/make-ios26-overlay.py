@@ -479,6 +479,8 @@ def main():
                     help='bluetoothd through btup with BT_HCI_TRANSPORT (e.g. H4BC:POSIX:com.apple.uart.bluetooth,115200), BlueTool stand-in')
     ap.add_argument('--strip-job', action='append', metavar='LABEL',
                     help='remove the LaunchDaemon with this Label (repeatable)')
+    ap.add_argument('--drop-mach-service', action='append', metavar='NAME',
+                    help='remove this Mach service from whichever job offers it (repeatable)')
     ap.add_argument('--mtl2-clients',
                     default='*\n-chronod\n-cameracaptured\n-WidgetRenderer_Default\n-PosterBoard',
                     help='/private/var/local/mtl2-clients content')
@@ -636,6 +638,20 @@ def main():
             removed.append(k)
         if not hits:
             print(f'launchd: warning: no job {label} to strip')
+    # --drop-mach-service NAME (repeatable): a service whose server never answers here, so its clients
+    # (synchronously, on their main thread) fail the lookup at once instead of timing out. raphael:
+    # com.apple.audio.hapticd (in the audio server, no audio/haptic hardware for it): CoreHaptics retries
+    # a 1 s XPC call 5 times on Settings' main thread per haptic engine -> Settings > Bluetooth hangs and
+    # the watchdog kills it (0x8badf00d).
+    for name in args.drop_mach_service or []:
+        hits = []
+        for k, j in jobs.items():
+            ms = j.get('MachServices') if isinstance(j, dict) else None
+            if isinstance(ms, dict) and name in ms:
+                del ms[name]
+                hits.append(f"{k} ({j.get('Label')})")
+        print(f"launchd: Mach service {name} dropped from {', '.join(hits)}" if hits else
+              f'launchd: warning: no job offers {name}')
     # Ensure backboardd never selects a 10-bit b3a8 / compressed swapchain on Boot #1
     # before SweetMetal2.bundle loads (+2.6 s after IOMFB open).
     bb_key = '/System/Library/LaunchDaemons/com.apple.backboardd.plist'

@@ -5,6 +5,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 16:40 MSK: Bluetooth "On"; Settings > Bluetooth hang is CoreHaptics
+- Kernel 0175 (defaults): bluetoothd stays up (0 exits in 140 s), Settings shows Bluetooth "On".
+- Tapping Bluetooth: BluetoothSettings loads, attaches to bluetoothd fine, then the main thread creates a CoreHaptics
+  engine: 5 attempts x 1 s "XPC timeout" to com.apple.audio.hapticd (audio server pid 98 never answers), 12 s
+  blocked; the watchdog kills Preferences (0x8badf00d, "Failed to terminate gracefully after 5.0s").
+- Image: --drop-mach-service com.apple.audio.hapticd (DROP_MACH, default on) so the lookup fails at once.
+
 ### raphael, 2026-11-13 13:05 MSK: kernel 0175 (bluetoothd reaches the LE scan start)
 - With 0174 and EXTRA_ARGS raphbtvscok=...: fce2.3 (4-byte Olympic selector) -> "STACK_READY/StackStarted";
   then the LE scan start: fe37 (scan params) and fe29 (scan enable) must succeed ("Scan stopped improperly with

@@ -153,6 +153,10 @@ else
 	STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}
 fi
 for j in $STRIP_JOBS; do overlay_args+=(--strip-job "$j"); done
+# Mach services whose server never answers on raphael; their clients then fail at once instead of hanging
+# (com.apple.audio.hapticd: Settings > Bluetooth hung 12 s in CoreHaptics and was killed). DROP_MACH="" keeps them.
+DROP_MACH=${DROP_MACH-com.apple.audio.hapticd}
+for m in $DROP_MACH; do overlay_args+=(--drop-mach-service "$m"); done
 # MTL2_CLIENTS='* -chronod ...' (spaces or newlines): which processes get HotMetal2 (/var/local/mtl2-clients);
 # default as upstream: everyone but chronod, cameracaptured, WidgetRenderer_Default and PosterBoard.
 if [[ -n "${MTL2_CLIENTS:-}" ]]; then
