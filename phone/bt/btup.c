@@ -195,13 +195,38 @@ load(const char *path, size_t *len)
  */
 static uint8_t nvm_rate_idx;
 
+/* The tags start right after the TLV header (type 2) or 4 bytes later (raphael's crnv21.bin: type 4, header
+ * 04 62 12 00 then 02 2b 0e 00): whichever start walks the tags to the end of the file. */
+static size_t
+nvm_tags_start(const uint8_t *d, size_t len)
+{
+	for (int k = 0; k < 2; k++) {
+		size_t start = (d[0] == 4) == (k == 0) ? 8 : 4;
+		size_t idx = start;
+		unsigned n = 0;
+		while (idx + 12 <= len) {
+			unsigned tl = d[idx + 2] | d[idx + 3] << 8;
+			if (idx + 12 + tl > len) {
+				break;
+			}
+			idx += 12 + tl;
+			n++;
+		}
+		if (n > 2 && len - idx < 4) {
+			return start;
+		}
+	}
+	return 0;
+}
+
 static void
 nvm_fixup(uint8_t *d, size_t len)
 {
-	if (len < 4 || (d[0] & 0xff) != 2) {
+	size_t idx = len >= 4 ? nvm_tags_start(d, len) : 0;
+	if (!idx) {
+		printf("btup: NVM: tags not found (header %02x %02x %02x %02x): sent as it is\n", d[0], d[1], d[2], d[3]);
 		return;
 	}
-	size_t idx = 4;
 	while (idx + 12 <= len) {
 		unsigned id = d[idx] | d[idx + 1] << 8, tl = d[idx + 2] | d[idx + 3] << 8;
 		uint8_t *data = d + idx + 12;
