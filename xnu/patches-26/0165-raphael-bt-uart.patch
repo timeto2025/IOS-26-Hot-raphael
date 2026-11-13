@@ -1,0 +1,646 @@
+From 73f7e7a1f64cfda1d9733cd3567e021503a2bd5a Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 03:06:33 +0300
+Subject: [PATCH] raphael: Bluetooth UART (WCN3990 on QUP2 SE3) as
+ /dev/raphael-bt
+
+---
+ bsd/conf/files       |   1 +
+ bsd/dev/raphael_bt.c | 592 +++++++++++++++++++++++++++++++++++++++++++
+ bsd/dev/sweet_ufs.c  |   2 +
+ 3 files changed, 595 insertions(+)
+ create mode 100644 bsd/dev/raphael_bt.c
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 4093ac9..d93ec54 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -112,6 +112,7 @@ bsd/dev/rmx1931_touch.c			standard
+ bsd/dev/raphael_touch.c			standard
+ bsd/dev/raphael_panel.c			standard
+ bsd/dev/raphael_haptic.c		standard
++bsd/dev/raphael_bt.c			standard
+ bsd/dev/rmx1931_battery.c		standard
+ bsd/dev/rmx1931_audio.c			standard
+ bsd/dev/rmx1931_torch.c			standard
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+new file mode 100644
+index 0000000..12e5b2f
+--- /dev/null
++++ b/bsd/dev/raphael_bt.c
+@@ -0,0 +1,592 @@
++/*
++ * Copyright (c) 2026 the IOS-26-Hot raphael port authors. MIT License.
++ *
++ * Redmi K20 Pro (raphael) Bluetooth: the UART to the WCN3990, as a character device for user space.
++ *
++ * Hardware facts (Xiaomi sm8150 device tree qupv3_se13_4uart, gcc-sm8150, this phone's dtbo):
++ *   - QUP wrapper 2 serial engine 3 at 0x00c8c000 (GENI firmware: UART), pins GPIO 43 CTS, 44 RFR,
++ *     45 TX, 46 RX in function 1, TLMM tile at 0x03500000.
++ *   - Clocks: GCC vote 0x52014 bit 1 (wrap2 S AHB), bit 2 (wrap2 M AHB), bit 7 (wrap2 S3); S3 RCG 0x1e4d8
++ *     in DFS mode (the boot firmware's frequency table), branch 0x1e4d4.
++ *   - The chip shares its supplies with the Wi-Fi (wland powers them): the UART is set up on the first open,
++ *     after the Wi-Fi is up.
++ *
++ * /dev/raphael-bt: read() and write() are raw H4 bytes; select() for reading; ioctl RBT_SET_BAUD (the UART's
++ * rate, from the DFS level that divides it exactly), RBT_SET_FLOW (honour CTS), RBT_FLUSH, and the termios
++ * ioctls a POSIX H4 transport issues (accepted; the rate in c_ospeed is applied). Polled FIFO mode, a 64 KiB
++ * receive ring. raphbt=0 turns it off.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/conf.h>
++#include <sys/errno.h>
++#include <sys/uio.h>
++#include <sys/proc.h>
++#include <sys/select.h>
++#include <sys/ioccom.h>
++#include <sys/filio.h>
++#include <sys/ttycom.h>
++#include <sys/termios.h>
++#include <sys/vnode.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/locks.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++#include <pexpert/arm64/board_config.h>
++#if !defined(SWEET_BOARD_RAPHAEL)
++#error "SWEET_BOARD_RAPHAEL must come from pexpert/arm64/SWEET.h"
++#endif
++#if SWEET_BOARD_RAPHAEL
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void raphael_bt_init(void);
++
++#define BT_SE_PA        0x00c8c000u
++#define BT_GCC_PA       0x00100000u
++#define BT_TLMM_PA      0x03500000u
++#define BT_TLMM_SIZE    0x00030000u
++#define BT_VOTE         0x52014u
++#define BT_VOTE_BITS    ((1u << 1) | (1u << 2) | (1u << 7))
++#define BT_RCG          0x1e4d8u
++#define BT_BR_SE        0x1e4d4u
++#define BT_PIN0         43u             /* 43 CTS, 44 RFR, 45 TX, 46 RX */
++
++/* GENI */
++#define G_FORCE_DEF     0x020u
++#define G_OUTPUT_CTRL   0x024u
++#define G_CGC_CTRL      0x028u
++#define G_STATUS        0x040u
++#define G_M_CLK_CFG     0x048u
++#define G_S_CLK_CFG     0x04cu
++#define G_IF_DISABLE    0x064u
++#define G_FW_REV        0x068u
++#define G_CLK_SEL       0x07cu
++#define G_DMA_MODE      0x258u
++#define U_TX_TRANS_CFG  0x25cu
++#define G_TX_PACK0      0x260u
++#define G_TX_PACK1      0x264u
++#define U_TX_WORD_LEN   0x268u
++#define U_TX_STOP_LEN   0x26cu
++#define U_TX_TRANS_LEN  0x270u
++#define U_RX_TRANS_CFG  0x280u
++#define G_RX_PACK0      0x284u
++#define G_RX_PACK1      0x288u
++#define U_RX_WORD_LEN   0x28cu
++#define U_RX_STALE      0x294u
++#define U_TX_PARITY     0x2a4u
++#define U_RX_PARITY     0x2a8u
++#define U_MANUAL_RFR    0x2acu
++#define G_M_CMD0        0x600u
++#define G_M_CMD_CTRL    0x604u
++#define G_M_IRQ         0x610u
++#define G_M_IRQ_EN      0x614u
++#define G_M_IRQ_CLR     0x618u
++#define G_S_CMD0        0x630u
++#define G_S_CMD_CTRL    0x634u
++#define G_S_IRQ         0x640u
++#define G_S_IRQ_EN      0x644u
++#define G_S_IRQ_CLR     0x648u
++#define G_TX_FIFO       0x700u
++#define G_RX_FIFO       0x780u
++#define G_TX_FIFO_ST    0x800u
++#define G_RX_FIFO_ST    0x804u
++#define G_RX_WM         0x810u
++#define G_RX_RFR_WM     0x814u
++#define G_DMA_GEN_CFG   0xe30u
++#define G_HW_PARAM_0    0xe24u
++#define G_HW_PARAM_1    0xe28u
++#define PACK0_8x4       0x0004380eu     /* 8 bits a character, four to a FIFO word, LSB first */
++#define PACK1_8x4       0x000c3e0eu
++
++#define RING            65536u
++
++static struct {
++	vm_offset_t se, gcc, tlmm;
++	bool up, broken, flow;
++	uint32_t baud, levels;
++	uint32_t level_hz[16];
++	uint8_t ring[RING];
++	volatile uint32_t head, tail;   /* head: written by the poller; tail: by readers */
++	uint64_t rx_bytes, tx_bytes, overruns;
++	struct selinfo sel;
++	int rx_chan, poll_chan;
++} bt;
++static LCK_GRP_DECLARE(raph_bt_grp, "raph-bt");
++static LCK_MTX_DECLARE(raph_bt_tx, &raph_bt_grp);
++static LCK_MTX_DECLARE(raph_bt_setup, &raph_bt_grp);
++
++static inline uint32_t
++rd(vm_offset_t b, uint32_t o)
++{
++	uint32_t v = *(volatile uint32_t *)(b + o);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++wr(vm_offset_t b, uint32_t o, uint32_t v)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(b + o) = v;
++	__asm__ volatile ("dsb osh" ::: "memory");
++}
++
++static bool
++wait_clear(vm_offset_t b, uint32_t o, uint32_t mask)
++{
++	for (int i = 0; i < 2000; i++) {
++		if (!(rd(b, o) & mask)) {
++			return true;
++		}
++		delay(10);
++	}
++	return false;
++}
++
++/* The DFS levels the boot firmware put into the S3 RCG: their rates, from source, divider and M/N. */
++static void
++bt_read_levels(void)
++{
++	static const uint64_t src_hz[8] = { 19200000, 600000000, 0, 0, 0, 0, 300000000, 0 };
++	bt.levels = 0;
++	if (!(rd(bt.gcc, BT_RCG + 0x14u) & 1u)) {
++		return;
++	}
++	for (unsigned l = 0; l < 8; l++) {
++		uint32_t cfg = rd(bt.gcc, BT_RCG + 0x1cu + 4u * l);
++		uint64_t hz = src_hz[(cfg >> 8) & 7u];
++		uint32_t hid = cfg & 0x1fu;
++		if (hid) {
++			hz = hz * 2u / (hid + 1u);
++		}
++		if ((cfg >> 12) & 3u) {
++			uint32_t m = rd(bt.gcc, BT_RCG + 0x5cu + 4u * l) & 0xffffu;
++			uint32_t n = ((~rd(bt.gcc, BT_RCG + 0x9cu + 4u * l)) & 0xffffu) + m;
++			hz = n ? hz * m / n : 0;
++		}
++		bt.level_hz[l] = (uint32_t)hz;
++		bt.levels = l + 1;
++		printf("RAPH BT: DFS level %u: cfg %#x -> %llu Hz\n", l, cfg, hz);
++	}
++}
++
++/* 32 samples a bit: the level whose rate is an exact multiple of 32 * baud, smallest divider first. */
++static int
++bt_set_baud_locked(uint32_t baud)
++{
++	if (baud < 1200 || baud > 4000000 || bt.levels == 0) {
++		return EINVAL;
++	}
++	uint64_t want = 32ull * baud;
++	int best = -1;
++	uint32_t best_div = 0;
++	for (unsigned l = 0; l < bt.levels; l++) {
++		uint64_t hz = bt.level_hz[l];
++		if (hz && hz % want == 0 && hz / want <= 0xfff && (best < 0 || hz / want < best_div)) {
++			best = (int)l;
++			best_div = (uint32_t)(hz / want);
++		}
++	}
++	if (best < 0) {
++		printf("RAPH BT: no DFS level divides %u baud exactly\n", baud);
++		return EINVAL;
++	}
++	wr(bt.se, G_CLK_SEL, (uint32_t)best);
++	wr(bt.se, G_M_CLK_CFG, (best_div << 4) | 1u);
++	wr(bt.se, G_S_CLK_CFG, (best_div << 4) | 1u);
++	bt.baud = baud;
++	printf("RAPH BT: %u baud: DFS level %d (%u Hz) / %u\n", baud, best, bt.level_hz[best], best_div);
++	return 0;
++}
++
++static void
++bt_flow_locked(bool on)
++{
++	wr(bt.se, U_TX_TRANS_CFG, on ? 0u : 2u);        /* bit 1: ignore CTS */
++	wr(bt.se, U_MANUAL_RFR, 0);                     /* RFR by the receiver's watermark */
++	bt.flow = on;
++}
++
++static void
++bt_start_rx_locked(void)
++{
++	wr(bt.se, G_S_CMD0, 1u << 27);                  /* UART_START_READ */
++}
++
++static bool
++bt_setup(void)
++{
++	lck_mtx_lock(&raph_bt_setup);
++	if (bt.up || bt.broken) {
++		lck_mtx_unlock(&raph_bt_setup);
++		return bt.up;
++	}
++	bt.broken = true;       /* until proven otherwise */
++	bt.gcc = ml_io_map(BT_GCC_PA, 0x60000);
++	bt.se = ml_io_map(BT_SE_PA, 0x4000);
++	bt.tlmm = ml_io_map(BT_TLMM_PA, BT_TLMM_SIZE);
++	if (!bt.gcc || !bt.se || !bt.tlmm) {
++		printf("RAPH BT: map failed\n");
++		goto out;
++	}
++	wr(bt.gcc, BT_VOTE, rd(bt.gcc, BT_VOTE) | BT_VOTE_BITS);
++	if (!wait_clear(bt.gcc, BT_BR_SE, 1u << 31)) {
++		printf("RAPH BT: S3 clock does not run (%#x)\n", rd(bt.gcc, BT_BR_SE));
++		goto out;
++	}
++	uint32_t fw = rd(bt.se, G_FW_REV);
++	printf("RAPH BT: SE3 fw %#x (protocol %u) status %#x if-disable %#x hw %#x/%#x\n", fw, (fw >> 8) & 0xffu,
++	    rd(bt.se, G_STATUS), rd(bt.se, G_IF_DISABLE), rd(bt.se, G_HW_PARAM_0), rd(bt.se, G_HW_PARAM_1));
++	if (((fw >> 8) & 0xffu) != 2u || (rd(bt.se, G_IF_DISABLE) & 1u)) {
++		printf("RAPH BT: SE3 has no FIFO-mode UART firmware from the boot loader; stopping\n");
++		goto out;
++	}
++	for (unsigned i = 0; i < 4; i++) {
++		uint32_t o = (BT_PIN0 + i) * 0x1000u;
++		uint32_t cfg = rd(bt.tlmm, o);
++		/* function 1 (qup13), 2 mA (6 mA for TX), CTS/RX with pull-up, RFR/TX without */
++		uint32_t want = (1u << 2) | ((i == 2 ? 2u : 0u) << 6) | ((i == 0 || i == 3) ? 3u : 0u);
++		if ((cfg & 0x3ffu) != want) {
++			wr(bt.tlmm, o, (cfg & ~0x3ffu) | want);
++		}
++		printf("RAPH BT: gpio%u cfg %#x -> %#x\n", BT_PIN0 + i, cfg, rd(bt.tlmm, o));
++	}
++	bt_read_levels();
++	/* GENI as the serial engine drivers set it up: clocks gated by hardware, outputs on, FIFO mode */
++	wr(bt.se, G_CGC_CTRL, rd(bt.se, G_CGC_CTRL) | 0x7fu);
++	wr(bt.se, G_DMA_GEN_CFG, rd(bt.se, G_DMA_GEN_CFG) | 0x0fu);
++	wr(bt.se, G_OUTPUT_CTRL, 0x7fu);
++	wr(bt.se, G_FORCE_DEF, 1u);
++	wr(bt.se, G_DMA_MODE, 0);
++	wr(bt.se, G_M_IRQ_EN, 0);
++	wr(bt.se, G_S_IRQ_EN, 0);
++	wr(bt.se, 0xe1cu, 0);
++	wr(bt.se, G_M_CMD_CTRL, 1u << 2);               /* abort what the boot loader may have left going */
++	wr(bt.se, G_S_CMD_CTRL, 1u << 2);
++	delay(1000);
++	wr(bt.se, G_M_IRQ_CLR, 0xffffffffu);
++	wr(bt.se, G_S_IRQ_CLR, 0xffffffffu);
++	uint32_t depth = (rd(bt.se, G_HW_PARAM_1) >> 16) & 0x3fu;
++	if (depth < 4) {
++		depth = 16;
++	}
++	wr(bt.se, G_RX_WM, 1);
++	wr(bt.se, G_RX_RFR_WM, depth - 2);
++	wr(bt.se, G_TX_PACK0, PACK0_8x4);
++	wr(bt.se, G_TX_PACK1, PACK1_8x4);
++	wr(bt.se, G_RX_PACK0, PACK0_8x4);
++	wr(bt.se, G_RX_PACK1, PACK1_8x4);
++	wr(bt.se, U_TX_PARITY, 0);
++	wr(bt.se, U_RX_PARITY, 0);
++	wr(bt.se, U_RX_TRANS_CFG, 0);
++	wr(bt.se, U_TX_WORD_LEN, 8);
++	wr(bt.se, U_RX_WORD_LEN, 8);
++	wr(bt.se, U_TX_STOP_LEN, 0);
++	wr(bt.se, U_RX_STALE, 0x18);
++	bt_flow_locked(false);
++	if (bt_set_baud_locked(115200) != 0) {
++		goto out;
++	}
++	bt_start_rx_locked();
++	bt.broken = false;
++	bt.up = true;
++	printf("RAPH BT: UART up at 115200 8N1 (FIFO depth %u words)\n", depth);
++out:
++	lck_mtx_unlock(&raph_bt_setup);
++	return bt.up;
++}
++
++/* The receive side: FIFO words into the ring; the stale timeout hands over a short last word. */
++static void
++bt_poll_rx(void)
++{
++	uint32_t st;
++	while ((st = rd(bt.se, G_RX_FIFO_ST)) & 0x1ffffffu) {
++		uint32_t words = st & 0x1ffffffu;
++		for (uint32_t w = 0; w < words; w++) {
++			uint32_t v = rd(bt.se, G_RX_FIFO);
++			uint32_t n = 4;
++			if (w == words - 1 && (st & (1u << 31))) {
++				n = (st >> 28) & 7u;
++				if (n == 0 || n > 4) {
++					n = 4;
++				}
++			}
++			for (uint32_t i = 0; i < n; i++) {
++				uint32_t next = (bt.head + 1) % RING;
++				if (next == bt.tail) {
++					bt.overruns++;
++					break;
++				}
++				bt.ring[bt.head] = (uint8_t)(v >> (8 * i));
++				bt.head = next;
++				bt.rx_bytes++;
++			}
++		}
++	}
++	uint32_t s = rd(bt.se, G_S_IRQ);
++	if (s) {
++		wr(bt.se, G_S_IRQ_CLR, s);
++		/* the read command ends on a stale or a break: start it again */
++		if (!(rd(bt.se, G_STATUS) & (1u << 12))) {
++			bt_start_rx_locked();
++		}
++	}
++}
++
++static void
++bt_poll_thread(void *arg __unused, wait_result_t wr_ __unused)
++{
++	for (;;) {
++		if (bt.up) {
++			uint32_t before = bt.head;
++			bt_poll_rx();
++			if (bt.head != before) {
++				wakeup(&bt.rx_chan);
++				selwakeup(&bt.sel);
++			}
++		}
++		uint64_t deadline;
++		clock_interval_to_deadline(bt.up ? 1 : 200, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&bt.poll_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++static int
++bt_tx(const uint8_t *p, uint32_t n)
++{
++	lck_mtx_lock(&raph_bt_tx);
++	wr(bt.se, U_TX_TRANS_LEN, n);
++	wr(bt.se, G_M_CMD0, 1u << 27);                  /* UART_START_TX */
++	uint32_t i = 0;
++	int err = 0;
++	uint64_t spins = 0;
++	while (i < n) {
++		uint32_t used = rd(bt.se, G_TX_FIFO_ST) & 0x0fffffffu;
++		if (used >= 12) {
++			if (++spins > 2000000) {
++				err = EIO;
++				break;
++			}
++			continue;
++		}
++		uint32_t v = 0;
++		for (uint32_t b = 0; b < 4 && i < n; b++, i++) {
++			v |= (uint32_t)p[i] << (8 * b);
++		}
++		wr(bt.se, G_TX_FIFO, v);
++	}
++	for (spins = 0; !err && !(rd(bt.se, G_M_IRQ) & 1u); spins++) {
++		if (spins > 4000000) {
++			err = EIO;
++		}
++	}
++	if (err) {
++		wr(bt.se, G_M_CMD_CTRL, 1u << 2);       /* cancel */
++		printf("RAPH BT: transmit stuck (%u of %u bytes, flow %d, M irq %#x)\n", i, n, bt.flow,
++		    rd(bt.se, G_M_IRQ));
++	}
++	wr(bt.se, G_M_IRQ_CLR, 0xffffffffu);
++	bt.tx_bytes += i;
++	lck_mtx_unlock(&raph_bt_tx);
++	return err;
++}
++
++/* ---- the device ---- */
++#define RBT_SET_BAUD    _IOW('B', 1, uint32_t)
++#define RBT_SET_FLOW    _IOW('B', 2, uint32_t)
++#define RBT_FLUSH       _IO('B', 3)
++#define RBT_STATS       _IOR('B', 4, uint64_t[4])
++
++static int
++bt_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return bt_setup() ? 0 : ENXIO;
++}
++
++static int
++bt_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static int
++bt_read(__unused dev_t dev, struct uio *uio, int ioflag)
++{
++	while (bt.head == bt.tail) {
++		if (ioflag & IO_NDELAY) {
++			return EWOULDBLOCK;
++		}
++		uint64_t deadline;
++		clock_interval_to_deadline(100, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&bt.rx_chan, THREAD_ABORTSAFE, deadline);
++		if (thread_block(THREAD_CONTINUE_NULL) == THREAD_INTERRUPTED) {
++			return EINTR;
++		}
++	}
++	int err = 0;
++	while (!err && uio_resid(uio) > 0 && bt.head != bt.tail) {
++		uint32_t h = bt.head, t = bt.tail;
++		uint32_t n = h > t ? h - t : RING - t;
++		if ((user_ssize_t)n > uio_resid(uio)) {
++			n = (uint32_t)uio_resid(uio);
++		}
++		err = uiomove((caddr_t)&bt.ring[t], (int)n, uio);
++		bt.tail = (t + n) % RING;
++	}
++	return err;
++}
++
++static int
++bt_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	uint8_t buf[1024];
++	int err = 0;
++	while (!err && uio_resid(uio) > 0) {
++		uint32_t n = uio_resid(uio) > (user_ssize_t)sizeof(buf) ? (uint32_t)sizeof(buf) : (uint32_t)uio_resid(uio);
++		err = uiomove((caddr_t)buf, (int)n, uio);
++		if (!err) {
++			err = bt_tx(buf, n);
++		}
++	}
++	return err;
++}
++
++static int
++bt_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p)
++{
++	int err = 0;
++	switch (cmd) {
++	case RBT_SET_BAUD:
++		lck_mtx_lock(&raph_bt_tx);
++		err = bt_set_baud_locked(*(uint32_t *)data);
++		lck_mtx_unlock(&raph_bt_tx);
++		return err;
++	case RBT_SET_FLOW:
++		lck_mtx_lock(&raph_bt_tx);
++		bt_flow_locked(*(uint32_t *)data != 0);
++		lck_mtx_unlock(&raph_bt_tx);
++		return 0;
++	case RBT_FLUSH:
++	case TIOCFLUSH:
++		bt.tail = bt.head;
++		return 0;
++	case RBT_STATS: {
++		uint64_t *s = (uint64_t *)data;
++		s[0] = bt.rx_bytes;
++		s[1] = bt.tx_bytes;
++		s[2] = bt.overruns;
++		s[3] = bt.baud;
++		return 0;
++	}
++	case FIONREAD:
++		*(int *)data = (int)((bt.head + RING - bt.tail) % RING);
++		return 0;
++	case FIONBIO:
++	case FIOASYNC:
++	case TIOCEXCL:
++	case TIOCNXCL:
++	case TIOCSDTR:
++	case TIOCCDTR:
++	case TIOCDRAIN:
++		return 0;
++	case TIOCMGET:
++		*(int *)data = TIOCM_DTR | TIOCM_RTS | TIOCM_CTS | TIOCM_DSR | TIOCM_CAR;
++		return 0;
++	case TIOCMSET:
++	case TIOCMBIS:
++	case TIOCMBIC:
++		return 0;
++	case TIOCGETA: {
++		struct termios *t = (struct termios *)data;
++		bzero(t, sizeof(*t));
++		t->c_cflag = CS8 | CREAD | CLOCAL | (bt.flow ? CRTSCTS : 0);
++		t->c_ispeed = t->c_ospeed = bt.baud;
++		return 0;
++	}
++	case TIOCSETA:
++	case TIOCSETAW:
++	case TIOCSETAF: {
++		struct termios *t = (struct termios *)data;
++		lck_mtx_lock(&raph_bt_tx);
++		if (t->c_ospeed && t->c_ospeed != bt.baud) {
++			err = bt_set_baud_locked((uint32_t)t->c_ospeed);
++		}
++		bt_flow_locked((t->c_cflag & CRTSCTS) != 0);
++		lck_mtx_unlock(&raph_bt_tx);
++		if (cmd == TIOCSETAF) {
++			bt.tail = bt.head;
++		}
++		return err;
++	}
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++bt_select(__unused dev_t dev, int which, void *wql, struct proc *p)
++{
++	if (which == FWRITE) {
++		return 1;
++	}
++	if (which == FREAD) {
++		if (bt.head != bt.tail) {
++			return 1;
++		}
++		selrecord(p, &bt.sel, wql);
++	}
++	return 0;
++}
++
++static const struct cdevsw raph_bt_cdevsw = {
++	.d_open       = bt_open,
++	.d_close      = bt_close,
++	.d_read       = bt_read,
++	.d_write      = bt_write,
++	.d_ioctl      = bt_ioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = bt_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = 0,
++};
++
++void
++raphael_bt_init(void)
++{
++	static bool started;
++	uint32_t on = 1;
++	thread_t thread;
++	if (started) {
++		return;
++	}
++	started = true;
++	(void)PE_parse_boot_argn("raphbt", &on, sizeof(on));
++	if (!on) {
++		printf("RAPH BT: disabled (raphbt=0)\n");
++		return;
++	}
++	int major = cdevsw_add(-1, &raph_bt_cdevsw);
++	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666,
++	    "raphael-bt") == NULL) {
++		printf("RAPH BT: /dev/raphael-bt cannot be made\n");
++		return;
++	}
++	if (kernel_thread_start(bt_poll_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++	printf("RAPH BT: /dev/raphael-bt ready (UART set up at first open)\n");
++}
++#endif /* SWEET_BOARD_RAPHAEL */
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 1162306..219b73d 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -60,6 +60,7 @@ extern void sweet_fts_init(void);
+ extern void rmx1931_touch_init(void);
+ #if SWEET_BOARD_RAPHAEL
+ extern void raphael_touch_init(void);
++extern void raphael_bt_init(void);
+ #endif
+ extern void rmx1931_battery_init(void);
+ extern void rmx1931_torch_init(void);
+@@ -691,6 +692,7 @@ sweet_ufs_init(void)
+ 	rmx1931_touch_init();
+ #if SWEET_BOARD_RAPHAEL
+ 	raphael_touch_init();	/* Goodix GT9886: bsd/dev/raphael_touch.c */
++	raphael_bt_init();	/* WCN3990 Bluetooth UART: bsd/dev/raphael_bt.c */
+ #endif
+ 	rmx1931_battery_init();
+ 	rmx1931_torch_init();
+-- 
+2.43.0
+

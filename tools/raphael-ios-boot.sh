@@ -124,6 +124,14 @@ if [[ "${RMTFS_RESTORE:-0}" == 1 ]]; then
 	done
 	echo "rmtfs: $n EFS image(s) restored from work/fw/rmtfs"
 fi
+# Bluetooth firmware (tools/raphael-extract-bt.sh): small, staged with every image for phone/bt/btup.
+n=0
+for f in "$ROOT"/work/fw/bt/crbtfw*.tlv "$ROOT"/work/fw/bt/crnv*.bin; do
+	[[ -f "$f" ]] || continue
+	overlay_args+=(--extra "$f:private/var/local/fw/bt/$(basename "$f"):0644")
+	n=$((n + 1))
+done
+[[ $n -gt 0 ]] && echo "Bluetooth: $n firmware file(s) staged at /var/local/fw/bt"
 # Daemons that only crash-loop on raphael (no Bluetooth driver yet, no SEP): STRIP_JOBS="" keeps them all.
 STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}
 for j in $STRIP_JOBS; do overlay_args+=(--strip-job "$j"); done

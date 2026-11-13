@@ -14,6 +14,7 @@ on:
     branches: [master]
     paths:
       - "phone/wifi/**"
+      - "phone/bt/**"
       - ".github/workflows/raphael-tools.yml"
 
 concurrency:
@@ -32,6 +33,14 @@ jobs:
           chmod +x work/userland/bin/ios-cc phone/wifi/build.sh
           sh phone/wifi/build.sh
           file phone/wifi/out/wland
+
+      - name: btup (Bluetooth bring-up)
+        run: |
+          set -e
+          mkdir -p phone/bt/out
+          work/userland/bin/ios-cc -O2 -Wall -o phone/bt/out/btup phone/bt/btup.c
+          codesign -f -s - phone/bt/out/btup || true
+          file phone/bt/out/btup
 
       - name: dash (/bin/sh)
         run: |
@@ -59,6 +68,7 @@ jobs:
         run: |
           mkdir -p dist/bin
           cp phone/wifi/out/wland dist/bin/
+          cp phone/bt/out/btup dist/bin/
           cp work/userland/src/dash-0.5.12/src/dash dist/bin/
           tar czf raphael-tools.tar.gz -C dist .
           tar tzvf raphael-tools.tar.gz
