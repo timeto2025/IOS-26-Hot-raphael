@@ -1,0 +1,300 @@
+From 25de531868e71c3c4bcf6ad18df0714c9bbd723c Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 01:04:34 +0300
+Subject: [PATCH] sweet MTL: recycle freed GPU pool buffers within their owner
+ (no map+bzero per full-screen render target)
+
+---
+ iokit/Kernel/arm/SweetAccelerator.cpp | 194 ++++++++++++++++++++++++--
+ 1 file changed, 179 insertions(+), 15 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+index 7787bd2..760403e 100644
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -90,6 +90,7 @@ struct SweetV2BO {
+ 	uint64_t iova;                  /* GPU address while mapped, else 0 */
+ 	uint64_t pool_pa;               /* allocated: its memory in the GPU pool (sweet_gpu_pool_alloc) */
+ 	bool imported;                  /* the client's own pages (no CPU-map token) */
++	uint32_t owner;                 /* allocating client's recycle id (pool memory only) */
+ };
+ 
+ class IOAcceleratorES : public IOService {
+@@ -102,6 +103,9 @@ class SweetAcceleratorUserClient;
+ static void sweet_accel_diag_init_lock(void);
+ static void sweet_accel_client_add(SweetAcceleratorUserClient *c);
+ static void sweet_accel_client_remove(SweetAcceleratorUserClient *c);
++static void rc_flush(uint32_t owner);
++static bool rc_take(uint32_t owner, uint64_t len, uint64_t *pa);
++static uint32_t rc_next_owner_get(void);
+ static uint32_t sweet_v2_reap_retired(void);
+ static void sweet_v2_reap_window(uint64_t win_base, uint64_t win_size);
+ 
+@@ -170,6 +174,7 @@ class SweetAcceleratorUserClient : public IOUserClient {
+ 	uint32_t fBOCap;
+ 	uint64_t *fPageBuf;
+ 	uint64_t fEpoch, fFaults;       /* GPU resets seen; those that lost this client's work */
++	uint32_t fRecycleId;            /* key of this client's buffers in the recycle cache (never reused) */
+ public:
+ 	uint32_t lastFence() const { return fLastFence; }
+ 	int pid() const { return fPid; }
+@@ -229,6 +234,7 @@ SweetAcceleratorUserClient::initWithTask(task_t owningTask, void *securityID, UI
+ 		fSystem = !strcmp(fName, "backboardd") || !strcmp(fName, "SpringBoard");
+ 		fV2 = true;
+ 	}
++	fRecycleId = rc_next_owner_get();
+ 	sweet_accel_client_add(this);
+ 	return true;
+ }
+@@ -289,6 +295,7 @@ void
+ SweetAcceleratorUserClient::free(void)
+ {
+ 	sweet_accel_client_remove(this);
++	rc_flush(fRecycleId);
+ 	/*
+ 	 * Submits are asynchronous: a client that exits (or crashes) may leave work queued. Unmapping its
+ 	 * memory under the GPU would fault, or hand the VAs and pages to someone else while the GPU still
+@@ -689,6 +696,7 @@ struct sweet_v2_retired {
+ 	uint64_t pool_pa;
+ 	uint32_t fence;
+ 	bool imported;
++	uint32_t owner;
+ };
+ 
+ static IOLock *sweet_retire_lock;
+@@ -707,6 +715,139 @@ sweet_retire_init_lock(void)
+ 	}
+ }
+ 
++/*
++ * Recycling of freed pool buffers within the process that freed them. backboardd allocates and frees its
++ * full-screen render targets (11 MB at 1125x2436) many times a second while the UI moves; every allocation
++ * was a kernel mapping plus an 11 MB bzero through a write-combined mapping, and when the pool ran short a
++ * wait for the GPU to retire older buffers (raphael: backboardd 385 -> 580 MB in 4 s of scrolling, 72 pool
++ * allocation failures). A freed buffer of >= 1 MB goes to this cache keyed by its owner; the same owner asking
++ * for exactly that size gets it back at once, unzeroed (it is its own memory). Up to 192 MB, oldest out first,
++ * emptied whenever the pool runs short. Boot-arg sweetgpurecycle=0 turns it off.
++ */
++#define RC_SLOTS        64
++#define RC_MAX_BYTES    (192ULL << 20)
++#define RC_MIN_BYTES    (1ULL << 20)
++static IOLock *rc_lock;
++static struct { uint32_t owner; uint64_t pa, len, stamp; } rc[RC_SLOTS];
++static uint64_t rc_bytes, rc_stamp, rc_hits, rc_puts;
++static int rc_on = -1;
++static uint32_t rc_next_owner = 1;
++
++static uint32_t
++rc_next_owner_get(void)
++{
++	return (uint32_t)OSIncrementAtomic((volatile SInt32 *)&rc_next_owner);
++}
++
++static bool
++rc_enabled(void)
++{
++	if (rc_on < 0) {
++		uint32_t v = 1;
++		PE_parse_boot_argn("sweetgpurecycle", &v, sizeof(v));
++		IOLock *l = IOLockAlloc();
++		if (!OSCompareAndSwapPtr(NULL, l, &rc_lock)) {
++			IOLockFree(l);
++		}
++		rc_on = (v != 0 && rc_lock != NULL) ? 1 : 0;
++	}
++	return rc_on == 1;
++}
++
++/* the oldest entry out (rc_lock held): returns its memory to the pool */
++static void
++rc_evict_oldest_locked(void)
++{
++	int o = -1;
++	for (int i = 0; i < RC_SLOTS; i++) {
++		if (rc[i].len != 0 && (o < 0 || rc[i].stamp < rc[o].stamp)) {
++			o = i;
++		}
++	}
++	if (o >= 0) {
++		sweet_gpu_pool_free(rc[o].pa, rc[o].len);
++		rc_bytes -= rc[o].len;
++		rc[o].len = 0;
++	}
++}
++
++static bool
++rc_put(uint32_t owner, uint64_t pa, uint64_t len)
++{
++	if (owner == 0 || len < RC_MIN_BYTES || len > RC_MAX_BYTES / 2 || !rc_enabled()) {
++		return false;
++	}
++	IOLockLock(rc_lock);
++	int slot = -1;
++	for (;;) {
++		for (int i = 0; i < RC_SLOTS && slot < 0; i++) {
++			if (rc[i].len == 0) {
++				slot = i;
++			}
++		}
++		if (slot >= 0 && rc_bytes + len <= RC_MAX_BYTES) {
++			break;
++		}
++		slot = -1;
++		rc_evict_oldest_locked();
++	}
++	rc[slot].owner = owner;
++	rc[slot].pa = pa;
++	rc[slot].len = len;
++	rc[slot].stamp = ++rc_stamp;
++	rc_bytes += len;
++	rc_puts++;
++	IOLockUnlock(rc_lock);
++	return true;
++}
++
++static bool
++rc_take(uint32_t owner, uint64_t len, uint64_t *pa)
++{
++	bool hit = false;
++	if (owner == 0 || len < RC_MIN_BYTES || !rc_enabled()) {
++		return false;
++	}
++	IOLockLock(rc_lock);
++	int best = -1;
++	for (int i = 0; i < RC_SLOTS; i++) {
++		if (rc[i].len == len && rc[i].owner == owner && (best < 0 || rc[i].stamp > rc[best].stamp)) {
++			best = i;
++		}
++	}
++	if (best >= 0) {
++		*pa = rc[best].pa;
++		rc_bytes -= len;
++		rc[best].len = 0;
++		rc_hits++;
++		hit = true;
++		if ((rc_hits & 1023) == 1) {
++			IOLog("SWEET MTL: recycle: %llu hits, %llu buffers cached in all, %llu MB held now\n", rc_hits, rc_puts,
++			    rc_bytes >> 20);
++		}
++	}
++	IOLockUnlock(rc_lock);
++	return hit;
++}
++
++/* owner 0: everything (the pool runs short); else that client's entries (it closed) */
++static void
++rc_flush(uint32_t owner)
++{
++	if (rc_lock == NULL || rc_on != 1) {
++		return;
++	}
++	IOLockLock(rc_lock);
++	for (int i = 0; i < RC_SLOTS; i++) {
++		if (rc[i].len != 0 && (owner == 0 || rc[i].owner == owner)) {
++			sweet_gpu_pool_free(rc[i].pa, rc[i].len);
++			rc_bytes -= rc[i].len;
++			rc[i].len = 0;
++		}
++	}
++	IOLockUnlock(rc_lock);
++}
++
+ static void
+ sweet_v2_finish_retired_batch(const struct sweet_v2_retired *batch, uint32_t n)
+ {
+@@ -717,6 +858,9 @@ sweet_v2_finish_retired_batch(const struct sweet_v2_retired *batch, uint32_t n)
+ 		if (batch[i].imported) {
+ 			batch[i].md->complete();
+ 			batch[i].md->release();
++		} else if (batch[i].md->getRetainCount() <= 1 &&
++		    rc_put(batch[i].owner, batch[i].pool_pa, batch[i].md->getLength())) {
++			batch[i].md->release();
+ 		} else {
+ 			sweet_pool_release(batch[i].md, batch[i].pool_pa);
+ 		}
+@@ -886,6 +1030,7 @@ sweet_v2_retire_bo(const SweetV2BO *dead)
+ 			sweet_retire_ring[tail].iova = dead->iova;
+ 			sweet_retire_ring[tail].pool_pa = dead->pool_pa;
+ 			sweet_retire_ring[tail].imported = dead->imported;
++			sweet_retire_ring[tail].owner = dead->owner;
+ 			sweet_retire_ring[tail].fence = dead->iova != 0 ? sweet_gpu_last_fence() : 0;
+ 			__atomic_store_n(&sweet_retire_count, sweet_retire_count + 1, __ATOMIC_RELEASE);
+ 			IOLockUnlock(sweet_retire_lock);
+@@ -897,7 +1042,7 @@ sweet_v2_retire_bo(const SweetV2BO *dead)
+ 				sweet_gpu_unmap_at(dead->iova, dead->bytes);
+ 			}
+ 			struct sweet_v2_retired one = {
+-				dead->md, dead->bytes, dead->iova, dead->pool_pa, 0, dead->imported
++				dead->md, dead->bytes, dead->iova, dead->pool_pa, 0, dead->imported, dead->owner
+ 			};
+ 			sweet_v2_finish_retired_batch(&one, 1);
+ 			return;
+@@ -979,32 +1124,51 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 		    sweet_gpu_pool_avail() < len + reserve_bytes &&
+ 		    sweet_v2_wait_oldest_retired()) {
+ 		}
+-		if (!v2PoolAllowed(len)) {
+-			return kIOReturnNoMemory;
+-		}
+-		while (sweet_gpu_pool_try_alloc(len, &pa)) {
+-			if (!sweet_v2_wait_oldest_retired()) {
+-				if (sweet_gpu_pool_alloc(len, &pa)) {
+-					return kIOReturnNoMemory;
++		bool reused = rc_take(fRecycleId, len, &pa);
++		if (!reused) {
++			if (sweet_gpu_pool_avail() < len + reserve_bytes) {
++				rc_flush(0);
++			}
++			if (!v2PoolAllowed(len)) {
++				return kIOReturnNoMemory;
++			}
++			bool flushed = false;
++			while (sweet_gpu_pool_try_alloc(len, &pa)) {
++				if (!flushed) {
++					flushed = true;
++					rc_flush(0);
++					continue;
++				}
++				if (!sweet_v2_wait_oldest_retired()) {
++					if (sweet_gpu_pool_alloc(len, &pa)) {
++						return kIOReturnNoMemory;
++					}
++					break;
+ 				}
+-				break;
+ 			}
+ 		}
+ 		IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pa, len, kIODirectionInOut);
+-		IOMemoryMap *km = md != NULL ? md->map(kIOMapWriteCombineCache) : NULL;
+-		if (km == NULL) {
+-			OSSafeReleaseNULL(md);
++		if (md == NULL) {
+ 			sweet_gpu_pool_free(pa, len);
+ 			return kIOReturnNoMemory;
+ 		}
+-		bzero((void *)km->getVirtualAddress(), len);
+-		__asm__ volatile ("dsb sy" ::: "memory");
+-		km->release();
++		if (!reused) {
++			IOMemoryMap *km = md->map(kIOMapWriteCombineCache);
++			if (km == NULL) {
++				OSSafeReleaseNULL(md);
++				sweet_gpu_pool_free(pa, len);
++				return kIOReturnNoMemory;
++			}
++			bzero((void *)km->getVirtualAddress(), len);
++			__asm__ volatile ("dsb sy" ::: "memory");
++			km->release();
++		}
+ 		IOLockLock(fLock);
+ 		uint64_t h = 0;
+ 		IOReturn r = v2NewSlot(md, rq->bytes, false, &h);
+ 		if (r == kIOReturnSuccess) {
+ 			fBO[h - 1].pool_pa = pa;
++			fBO[h - 1].owner = fRecycleId;
+ 			fPoolBytes += len;
+ 			if (fPoolBytes > fPoolPeak) {
+ 				uint64_t prevPeak = fPoolPeak;
+-- 
+2.43.0
+

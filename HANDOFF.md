@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 01:15 MSK: lag/VRAM: backboardd churns full-screen buffers -> 0180 recycle cache
+- status while scrolling (0178): 30 fps, GPU busy 26% (backboardd 1115 ms / 5 s), pool 657 -> 791 / 944 MB in 4 s,
+  backboardd 444 -> 580 MB (peak 604), after: 385 MB; pool alloc failures 72. GPU is not saturated: the time goes
+  into allocation. Every v2 BoAlloc mapped the buffer write-combined and bzero'd it (11 MB per full-screen target),
+  and waited for the GPU to retire old buffers when the pool ran short.
+- 0180: freed pool buffers >= 1 MB go to a 192 MB cache keyed by the owning client (fRecycleId, never reused);
+  the same owner asking for the same size gets one back without map/bzero; flushed when the pool runs short and
+  when the client closes. sweetgpurecycle=0 disables. klog "SWEET MTL: recycle: N hits".
+
 ### raphael, 2026-11-14 01:00 MSK: 0178 flips every frame; boot stuck on the logo after a GPU fault -> 0179
 - 0178 klog: "300 swaps ... 300 flipped, 0 drawn over" (every frame reaches the panel).
 - One boot hung on the Apple logo: [33.902] "present: GPU hang or fault (fence 70, done 59, smmu fsr 2 far 6b1cc000
