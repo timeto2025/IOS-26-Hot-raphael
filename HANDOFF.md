@@ -5,6 +5,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 16:55 MSK: kernel 0176 (real LE scan, tearing counters)
+- raphbtscan=1 (default): on 0xfe29 enable the kernel sends LE Set Scan Parameters (passive, fe37's main-core
+  interval/window) + LE Set Scan Enable (dup filter) to the WCN3998 and swallows their Command Complete; disable
+  sends Scan Enable 0. "RAPH BT: LE scan on/off" in the log.
+- User reports horizontal tearing while scrolling. The 5 s "SWEET FB" line now adds GPU/CPU presents (CPU ones draw
+  into frame 0 on screen = tearing), the fallback reason, flip state and flips/drawn-over counts.
+
 ### raphael, 2026-11-13 16:40 MSK: Bluetooth "On"; Settings > Bluetooth hang is CoreHaptics
 - Kernel 0175 (defaults): bluetoothd stays up (0 exits in 140 s), Settings shows Bluetooth "On".
 - Tapping Bluetooth: BluetoothSettings loads, attaches to bluetoothd fine, then the main thread creates a CoreHaptics

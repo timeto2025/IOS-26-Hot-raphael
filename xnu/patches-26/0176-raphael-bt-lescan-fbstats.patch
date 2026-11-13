@@ -1,0 +1,197 @@
+From 21ee1259166bb833c28183d13303602352d9e9e4 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 16:32:18 +0300
+Subject: [PATCH] raphael: real LE scanning behind Apple's scan VSCs
+ (raphbtscan), present/flip counters in the 5 s framebuffer line
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c                  | 80 +++++++++++++++++++++++++++
+ bsd/dev/sweet_gpu.c                   | 10 ++++
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 19 ++++++-
+ 3 files changed, 106 insertions(+), 3 deletions(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index 86477af..a9336c0 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -818,9 +818,85 @@ bt_fake_find(uint16_t op)
+ 	return NULL;
+ }
+ 
++/*
++ * bluetoothd scans through Apple's vendor commands (0xfe37 scan parameters for the main and the low-power core,
++ * 0xfe29 scan enable), which this chip does not have. raphbtscan=1 (default): the kernel answers them (above)
++ * and issues the standard LE Set Scan Parameters / Set Scan Enable itself, so the WCN3998 really scans and its
++ * advertising reports reach bluetoothd. Their Command Complete events are not passed up.
++ * fe37 parameters as seen: 01 00 01 02 CORE 00 INTERVAL(2) WINDOW(2) 1e 00 (interval 0x1e0 = 300 ms, window
++ * 0x30 = 30 ms, as bluetoothd logs "Starting passive scan (300.00ms/30.00ms)"); fe29: ENABLE 02 01 02 ...
++ */
++static struct {
++	uint32_t on;
++	uint16_t interval, window;
++	unsigned own;           /* our LE commands whose Command Complete is still to come */
++	bool enabled;
++} bt_scan = { 1, 0x1e0, 0x30, 0, false };
++
++static void
++bt_scan_cmd(uint16_t op, const uint8_t *p, uint8_t plen)
++{
++	uint8_t c[4 + 8];
++	c[0] = 1;
++	c[1] = (uint8_t)op;
++	c[2] = (uint8_t)(op >> 8);
++	c[3] = plen;
++	memcpy(c + 4, p, plen);
++	bt.c_txerr += bt_tx(c, 4u + plen) != 0;
++	bt_scan.own++;
++}
++
++static void
++bt_scan_vendor(const uint8_t *d, size_t len)
++{
++	uint16_t op = (uint16_t)(d[1] | d[2] << 8);
++	if (!bt_scan.on) {
++		return;
++	}
++	if (op == 0xfe37 && len >= 4 + 10 && d[8] == 1) {      /* the main core's parameters */
++		bt_scan.interval = (uint16_t)(d[10] | d[11] << 8);
++		bt_scan.window = (uint16_t)(d[12] | d[13] << 8);
++	} else if (op == 0xfe29 && len >= 5) {
++		bool en = d[4] != 0;
++		if (en) {
++			uint16_t iv = bt_scan.interval >= 4 && bt_scan.interval <= 0x4000 ? bt_scan.interval : 0x1e0;
++			uint16_t wn = bt_scan.window >= 4 && bt_scan.window <= iv ? bt_scan.window : 0x30;
++			uint8_t sp[7] = { 0 /* passive */, (uint8_t)iv, (uint8_t)(iv >> 8), (uint8_t)wn, (uint8_t)(wn >> 8),
++				              0 /* public address */, 0 /* accept all */ };
++			if (bt_scan.enabled) {
++				uint8_t off[2] = { 0, 0 };
++				bt_scan_cmd(0x200c, off, 2);
++			}
++			bt_scan_cmd(0x200b, sp, 7);
++			uint8_t on[2] = { 1, 1 /* filter duplicates */ };
++			bt_scan_cmd(0x200c, on, 2);
++		} else if (bt_scan.enabled) {
++			uint8_t off[2] = { 0, 0 };
++			bt_scan_cmd(0x200c, off, 2);
++		}
++		if (en != bt_scan.enabled) {
++			printf("RAPH BT: LE scan %s (interval %u, window %u x 0.625 ms)\n", en ? "on" : "off",
++			    bt_scan.interval, bt_scan.window);
++		}
++		bt_scan.enabled = en;
++	}
++}
++
+ static void
+ bt_ctl_deliver(kern_ctl_ref ref, uint32_t unit)
+ {
++	/* Command Complete / Status of the kernel's own LE scan commands */
++	if (bt_scan.own && fr.pk[0] == 4 && ((fr.pk[1] == 0x0e && fr.n >= 7 && fr.pk[5] == 0x20 &&
++	    (fr.pk[4] == 0x0b || fr.pk[4] == 0x0c)) || (fr.pk[1] == 0x0f && fr.n >= 7 && fr.pk[6] == 0x20 &&
++	    (fr.pk[5] == 0x0b || fr.pk[5] == 0x0c)))) {
++		bt_scan.own--;
++		uint8_t st = fr.pk[1] == 0x0e ? fr.pk[6] : fr.pk[3];
++		if (st != 0 && bt.c_log) {
++			printf("RAPH BT: own LE command %#06x: status %#x\n", fr.pk[1] == 0x0e ? fr.pk[4] | fr.pk[5] << 8 :
++			    fr.pk[5] | fr.pk[6] << 8, st);
++		}
++		return;
++	}
+ 	/* Read_Local_Supported_Commands: 04 0e len ncmd 02 10 status + 64 octets */
+ 	if (fr.pk[0] == 4 && fr.pk[1] == 0x0e && fr.n >= 7u + 64u && fr.pk[4] == 0x02 && fr.pk[5] == 0x10 &&
+ 	    fr.pk[6] == 0) {
+@@ -932,6 +1008,8 @@ bt_ctl_connect(kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinfo)
+ 	bt.c_epoch++;
+ 	bt.tail = bt.head;              /* nothing stale for the new client */
+ 	bt.c_log = 400;
++	bt_scan.enabled = false;
++	bt_scan.own = 0;
+ 	lck_mtx_unlock(&raph_bt_ctl);
+ 	*unitinfo = NULL;
+ 	printf("RAPH BT: %s: client connected (unit %u, controller %s, %u baud, pid %d %s)\n", BT_CTL_NAME,
+@@ -1004,6 +1082,7 @@ bt_ctl_send(kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mbuf_t m,
+ 			 * answer must then carry at least 4 bytes.
+ 			 */
+ 			uint16_t op = (uint16_t)(d[1] | d[2] << 8);
++			bt_scan_vendor(d, len);
+ 			int ok = bt.vsc == 2 ? 0 : bt_vscok_find(op);
+ 			uint8_t ev[7 + 1 + 250];
+ 			bzero(ev, sizeof(ev));
+@@ -1164,6 +1243,7 @@ raphael_bt_init(void)
+ 	(void)PE_parse_boot_argn("raphbtvsc", &bt.vsc, sizeof(bt.vsc));
+ 	bt_fake_parse();
+ 	bt_vscok_parse();
++	(void)PE_parse_boot_argn("raphbtscan", &bt_scan.on, sizeof(bt_scan.on));
+ 	bt_ctl_register();
+ 	printf("RAPH BT: /dev/raphael-bt ready (UART set up at first open)\n");
+ }
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index e15b6dd..2b6fcb7 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -607,6 +607,16 @@ sweet_gpu_flip_poll(void)
+ 	lck_mtx_unlock(&sweet_gpu_lock);
+ }
+ 
++/* For the framebuffer's 5 s line: flips so far, frames drawn over while waiting, state (-1/0/1). */
++void sweet_gpu_flip_stats(uint64_t *flips, uint64_t *skipped, int *state);
++void
++sweet_gpu_flip_stats(uint64_t *flips, uint64_t *skipped, int *state)
++{
++	*flips = flip_count;
++	*skipped = flip_skipped;
++	*state = flip_state;
++}
++
+ /* Before the CPU draws into frame 0 (the fallback path): put frame 0 back on screen. */
+ void sweet_gpu_flip_reset(void);
+ void
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a3e0e41..9eaa8c1 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,6 +51,8 @@ int sweet_gpu_surface_slot(uint64_t key);
+ int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+ void sweet_gpu_flip_poll(void);
+ void sweet_gpu_flip_reset(void);
++void sweet_gpu_flip_stats(uint64_t *flips, uint64_t *skipped, int *state);
++static const char *sweet_fb_last_fallback = "none";
+ int sweet_gpu_present(int slot, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch,
+ 	uint32_t fb_pitch, uint32_t corner_radius, uint32_t *out_dx, uint32_t *out_dy,
+ 	uint32_t *out_dw, uint32_t *out_dh);
+@@ -335,8 +337,20 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		fb->fLast5sFpsX10 = (uint32_t)(swaps * 2ULL);
+ 		IOLockUnlock(fb->fLock);
+ 		if (swaps || presents) {
+-			IOLog("SWEET FB: 5s: %llu swaps (%llu.%llu fps), %llu panel copies, avg copy %llu us\n",
+-			    swaps, swaps / 5, (swaps * 2) % 10, presents, avg_us);
++			/* raphael tearing check: GPU presents flip at TE; CPU ones draw into the frame on screen */
++			static uint64_t last_flips, last_skipped, last_gpu, last_cpu;
++			uint64_t flips = 0, skipped = 0;
++			int fstate = -1;
++			sweet_gpu_flip_stats(&flips, &skipped, &fstate);
++			IOLog("SWEET FB: 5s: %llu swaps (%llu.%llu fps), %llu panel copies, avg copy %llu us; "
++			    "gpu %llu cpu %llu (%s), flip %d: %llu flipped, %llu drawn over\n",
++			    swaps, swaps / 5, (swaps * 2) % 10, presents, avg_us, fb->fGpuPresents - last_gpu,
++			    fb->fCpuPresents - last_cpu, fb->fCpuPresents != last_cpu && sweet_fb_last_fallback ?
++			    sweet_fb_last_fallback : "-", fstate, flips - last_flips, skipped - last_skipped);
++			last_flips = flips;
++			last_skipped = skipped;
++			last_gpu = fb->fGpuPresents;
++			last_cpu = fb->fCpuPresents;
+ 		}
+ 	}
+ 	/*
+@@ -508,7 +522,6 @@ AppleCLCD::refreshBrightness(void)
+ 
+ static uint32_t sweet_fb_gpu_why_logged;
+ static uint64_t sweet_fb_gpu_fallback_count;
+-static const char *sweet_fb_last_fallback = "none";
+ 
+ /* Why presentGPU fell back to the CPU copy, logged once per reason. */
+ static bool
+-- 
+2.43.0
+
