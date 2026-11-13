@@ -5,6 +5,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 02:40 MSK: measured: GPU-bound backboardd; HAL loses IO cycles
+- 0181 klog: allocation is cheap (50-100 ms per 5 s, zeroing <= 21 ms), recycle barely used. Opening apps / the
+  switcher: GPU busy 60-87%, backboardd jobs mean 5-24 ms, longest 75-127 ms; frames then drop (94 swaps, 37
+  flipped). The lag is backboardd's GPU work (blur/scale effects), not memory management.
+- adspd feed lines: HAL delivers 38-43.7k frames/s vs the DSP's 48k; hal gaps ~2-3/s of ~1 cycle (mOutputTime
+  jumps ~950-1200 frames, once 5548): CoreAudio skips IO cycles. TFA status fine (state 9, no CLIP/OCP; UVP/OTP
+  bits in 0x10 are the POR-ok flags). HotAudio SafetyOffset was 0 -> now 512 frames.
+
 ### raphael, 2026-11-14 01:15 MSK: lag/VRAM: backboardd churns full-screen buffers -> 0180 recycle cache
 - status while scrolling (0178): 30 fps, GPU busy 26% (backboardd 1115 ms / 5 s), pool 657 -> 791 / 944 MB in 4 s,
   backboardd 444 -> 580 MB (peak 604), after: 385 MB; pool alloc failures 72. GPU is not saturated: the time goes

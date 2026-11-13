@@ -704,9 +704,17 @@ property(AudioObjectID object, const AudioObjectPropertyAddress *address, UInt32
 		case kAudioDevicePropertyRelatedDevices:
 			WORD(d->object);
 			break;
+		case kAudioDevicePropertySafetyOffset:
+			/*
+			 * Margin before the IO deadline. With 0, every late wake-up of audiomxd's IO thread was an
+			 * overload and CoreAudio skipped the cycle: raphael's adspd saw the HAL deliver 38-43k frames/s
+			 * against the DSP's 48k, ~2 cycle gaps a second, heard as crackle and stutter. 512 frames
+			 * (10.7 ms) of margin; adspd's jitter buffer takes the extra lead.
+			 */
+			WORD(512);
+			break;
 		case kAudioDevicePropertyClockDomain:
 		case kAudioDevicePropertyLatency:
-		case kAudioDevicePropertySafetyOffset:
 		case kAudioDevicePropertyIsHidden:
 			WORD(0);
 			break;
