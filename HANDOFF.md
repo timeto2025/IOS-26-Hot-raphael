@@ -5,6 +5,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 01:00 MSK: 0178 flips every frame; boot stuck on the logo after a GPU fault -> 0179
+- 0178 klog: "300 swaps ... 300 flipped, 0 drawn over" (every frame reaches the panel).
+- One boot hung on the Apple logo: [33.902] "present: GPU hang or fault (fence 70, done 59, smmu fsr 2 far 6b1cc000
+  fsynr0 30001)" in SpringBoard's first frame (ib1 0x11050b0000); recover ok, but SpringBoard + backboardd (FAULTS=1)
+  kept presenting the last frame. ssh 'kill -9 60 28' brought the UI back.
+- 0179: gpu_recover_locked schedules a thread_call that SIGKILLs the clients whose last fence was in the lost range
+  (SweetAccelerator sweet_accel_lost_pids); launchd restarts them. sweetgpukill=0 disables. Open: the fault itself.
+
 ### raphael, 2026-11-13 19:15 MSK: audio compared with HackiOS ports (redwood, OnePlus 8 instantnoodle)
 - OnePlus 8 (dekefake/hackios-op8pro, Evsio0n/instantnoodle-xnu): 2x TFA9874 rev 0x0c74 on TERT MI2S, two 32-bit
   slots, 3.072 MHz, same NXP cold-start order as ours; ADM/ASM topologies NONE (0x10312 / 0x10c68); level applied to
