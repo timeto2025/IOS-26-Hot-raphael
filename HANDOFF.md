@@ -5,6 +5,16 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 03:00 MSK: CoreAudio overloads + rate scalar 0.85
+- oslog audiomxd during a ringtone: 42x "HALS_OverloadMessage: Overload possibly due to safety violation", 21x
+  "HALS_IORawClock::Update: Re-anchoring IO timeline. Sample time is consecutive, host time is not consecutive",
+  AQIONode rate scalar alternating 0.85 / 1.0, overload detail "start 12232648286 wake 12230694261" with IO cycle
+  windows of ~10M ticks. HAL IO itself takes ~0.65 ms. CoreAudio's clock of HotAudio is unstable, not the CPU.
+- HotAudio now stores CoreAudio's mDeviceHostTicksPerFrame, ours and the cycle's output lead in the shm; adspd's
+  feed line prints them ("ticks/frame CA x ours y lead z").
+- User: switcher background looks pixelated (downsampled, not blurred); GPU-heavy: app open/close, switcher;
+  smooth: text scrolling, Control Center.
+
 ### raphael, 2026-11-14 02:40 MSK: measured: GPU-bound backboardd; HAL loses IO cycles
 - 0181 klog: allocation is cheap (50-100 ms per 5 s, zeroing <= 21 ms), recycle barely used. Opening apps / the
   switcher: GPU busy 60-87%, backboardd jobs mean 5-24 ms, longest 75-127 ms; frames then drop (94 swaps, 37

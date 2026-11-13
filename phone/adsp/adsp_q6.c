@@ -1589,14 +1589,17 @@ adsp_q6_tick(void)
 				amp[0] = 0;
 			}
 			adsp_log("feed %llums%s: hal +%u (%u fps) dsp +%u periods (%u fps); full %u silence %u waits %u "
-			    "resync %u; backlog %u..%u queued>=%u state %d underruns %llu; hal gaps %u (last %d) cycle %u/%u; %s",
+			    "resync %u; backlog %u..%u queued>=%u state %d underruns %llu; hal gaps %u (last %d) cycle %u/%u "
+			    "ticks/frame CA %u.%03u ours %u.%03u lead %d; %s",
 			    (unsigned long long)dt, flush_partial ? " (end)" : "", last_w - w0,
 			    (unsigned)((uint64_t)(last_w - w0) * 1000ULL / dt),
 			    (uint32_t)g_status.periods_written - pw0,
 			    (unsigned)((uint64_t)((uint32_t)g_status.periods_written - pw0) * ADSP_PCM_PERIOD_FRAMES * 1000ULL / dt),
 			    feed_full, feed_silence, feed_waits, feed_resyncs, feed_min_avail, feed_max_avail,
 			    feed_min_queued, feed_state, (unsigned long long)g_status.underruns,
-			    g_shm->reserved[0], (int)g_shm->reserved[1], g_shm->reserved[2], g_shm->reserved[3], amp);
+			    g_shm->reserved[0], (int)g_shm->reserved[1], g_shm->reserved[2], g_shm->reserved[3],
+			    g_shm->reserved[4] / 1000, g_shm->reserved[4] % 1000, g_shm->reserved[5] / 1000,
+			    g_shm->reserved[5] % 1000, (int)g_shm->reserved[6], amp);
 			t0 = 0;
 		}
 		if (t0 == 0 || !hal_active) {

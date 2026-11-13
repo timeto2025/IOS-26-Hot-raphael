@@ -1227,6 +1227,12 @@ do_io_operation(__unused AudioServerPlugInDriverRef drv, __unused AudioObjectID 
 			next_st = st + frames;
 			__atomic_store_n(&s->reserved[2], frames, __ATOMIC_RELEASE);
 			__atomic_store_n(&s->reserved[3], cycle->mNominalIOBufferFrameSize, __ATOMIC_RELEASE);
+			/* CoreAudio's view of this device's clock: host ticks per frame (x1000; ours is ticks_per_frame),
+			 * and how far ahead of now the cycle's output time is, in frames (negative: late) */
+			__atomic_store_n(&s->reserved[4], (uint32_t)(cycle->mDeviceHostTicksPerFrame * 1000.0), __ATOMIC_RELEASE);
+			__atomic_store_n(&s->reserved[5], (uint32_t)(ticks_per_frame * 1000.0), __ATOMIC_RELEASE);
+			__atomic_store_n(&s->reserved[6], (uint32_t)(int32_t)(((Float64)cycle->mOutputTime.mHostTime -
+			    (Float64)mach_absolute_time()) / ticks_per_frame), __ATOMIC_RELEASE);
 		}
 		shm_write_speaker(buffer, frames);
 		if (fd < 0 || write(fd, buffer, (size_t)frames * HAKIOS_AUDIO_FRAME) < 0) {
