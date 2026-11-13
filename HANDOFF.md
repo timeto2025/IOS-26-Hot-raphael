@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 05:30 MSK: kernel 0170 (BT framer + exit log)
+- Observed with 0169: bluetoothd connects to com.apple.uart.bluetooth, asks the bluetool stand-in for "boot"/"init"
+  (answered 0), sends HCI_Reset, Read_Local_Version, Supported_Commands, BD_ADDR, Features, Set_Event_Mask,
+  LE commands — all answered status 0 — then exits about 0.6 s after start with no message on stderr and no
+  fatal signal; launchd restarts it every 10 s. The first session also got QCA debug ACL packets (handle 0x2edc).
+- 0170: whole-packet H4 framer on the socket side (drops handle 0x2edc), every command/answer logged
+  (`RAPH BT: >` / `<`, 400 lines a connection), `exit NAME[pid]: status/signal/reason` for bluetoothd (exitlog=1: all),
+  raphbtvsc=1 (EXTRA_ARGS) answers OGF 0x3f vendor commands in the kernel with success.
+
 ### raphael, 2026-11-13 05:10 MSK: Bluetooth step 3, kernel 0169 (bluetoothd on the kernel control)
 - Observed with 0168 + ADT /arm-io/bluetooth: btup loads crbtfw21/crnv21 (HCI 5.1, manufacturer 29, BD_ADDR
   39:90:21:74:07:00); BlueTool is exec'd at ~50 s; Settings > Bluetooth highlights and then hangs.

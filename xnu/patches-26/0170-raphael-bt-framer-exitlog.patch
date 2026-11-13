@@ -1,0 +1,290 @@
+From 69b2467dff76f896f5dbb53fc78ce43241604f33 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 05:23:36 +0300
+Subject: [PATCH] raphael BT: H4 framer for the kernel control (whole packets,
+ QCA debug log dropped, HCI logged), raphbtvsc=1, exit log for bluetoothd
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c | 149 +++++++++++++++++++++++++++++++++++--------
+ bsd/kern/kern_exit.c |  21 ++++++
+ 2 files changed, 144 insertions(+), 26 deletions(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index 2026453..9481bdc 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -133,6 +133,7 @@ static struct {
+ 	uint32_t c_unit, c_epoch;
+ 	uint64_t c_rx, c_tx, c_full, c_txerr;
+ 	unsigned c_log;
++	uint32_t vsc;
+ 	uint32_t tio_iflag, tio_oflag, tio_lflag;
+ 	uint8_t tio_cc[20];
+ } bt;
+@@ -642,7 +643,6 @@ bt_select(__unused dev_t dev, int which, void *wql, struct proc *p)
+ #define BT_TIOCSETA     0x80487414u
+ #define BT_TIOCSETAW    0x80487415u
+ #define BT_TIOCSETAF    0x80487416u
+-#define BT_CHUNK        4096u
+ 
+ /* struct termios as LP64 userland lays it out: tcflag_t and speed_t are unsigned long */
+ struct bt_utermios {
+@@ -652,8 +652,20 @@ struct bt_utermios {
+ };
+ _Static_assert(sizeof(struct bt_utermios) == 72, "LP64 struct termios");
+ 
++/*
++ * The receive side for the socket: an H4 framer over the ring, so whole packets go up and each can be logged.
++ * Qualcomm controllers send their own debug log as ACL data on handle 0x2EDC (Linux btqca's QCA_DEBUG_HANDLE);
++ * bluetoothd has no such connection, so those packets are dropped here.
++ */
++#define QCA_DEBUG_HANDLE 0x2edcu
++static struct {
++	uint8_t pk[2048];
++	uint32_t n, need, epoch;
++	uint64_t dropped_dbg, garbage, lost;
++} fr;
++
+ static void
+-bt_ctl_log(const char *dir, const uint8_t *p, size_t n)
++bt_ctl_log_tx(const uint8_t *p, size_t n)
+ {
+ 	char hex[3 * 12 + 1];
+ 	size_t o = 0;
+@@ -661,20 +673,98 @@ bt_ctl_log(const char *dir, const uint8_t *p, size_t n)
+ 		return;
+ 	}
+ 	bt.c_log--;
+-	for (size_t i = 0; i < n && i < 12; i++) {
++	for (size_t i = 4; i < n && i < 16; i++) {
+ 		o += (size_t)snprintf(hex + o, sizeof(hex) - o, "%02x ", p[i]);
+ 	}
+-	if (dir[0] == 'T' && n >= 4 && p[0] == 1) {
+-		printf("RAPH BT: %s cmd %#06x plen %u (%u bytes): %s\n", dir, p[1] | p[2] << 8, p[3], (unsigned)n, hex);
++	hex[o] = 0;
++	if (n >= 4 && p[0] == 1) {
++		printf("RAPH BT: > cmd %#06x (ogf %#x ocf %#x) plen %u: %s\n", p[1] | p[2] << 8, p[2] >> 2,
++		    (p[1] | p[2] << 8) & 0x3ffu, p[3], hex);
++	} else {
++		printf("RAPH BT: > type %u, %u bytes\n", n ? p[0] : 0, (unsigned)n);
++	}
++}
++
++static void
++bt_ctl_log_rx(const uint8_t *p, uint32_t n)
++{
++	if (bt.c_log == 0) {
++		return;
++	}
++	bt.c_log--;
++	if (p[0] == 4 && n >= 7 && p[1] == 0x0e) {
++		char hex[3 * 10 + 1];
++		size_t o = 0;
++		for (uint32_t i = 7; i < n && i < 17; i++) {
++			o += (size_t)snprintf(hex + o, sizeof(hex) - o, "%02x ", p[i]);
++		}
++		hex[o] = 0;
++		printf("RAPH BT: < complete %#06x status %#x (%u bytes) %s\n", p[4] | p[5] << 8, p[6], n, hex);
++	} else if (p[0] == 4 && n >= 7 && p[1] == 0x0f) {
++		printf("RAPH BT: < status %#06x status %#x\n", p[5] | p[6] << 8, p[3]);
++	} else if (p[0] == 4 && n >= 3) {
++		printf("RAPH BT: < event %#04x plen %u: %02x %02x %02x %02x\n", p[1], p[2], n > 3 ? p[3] : 0,
++		    n > 4 ? p[4] : 0, n > 5 ? p[5] : 0, n > 6 ? p[6] : 0);
++	} else {
++		printf("RAPH BT: < type %u, %u bytes (handle %#x)\n", p[0], n, n >= 3 ? (p[1] | p[2] << 8) & 0xfffu : 0);
++	}
++}
++
++static void
++bt_ctl_deliver(kern_ctl_ref ref, uint32_t unit)
++{
++	if (fr.pk[0] == 2 && ((fr.pk[1] | fr.pk[2] << 8) & 0xfffu) == QCA_DEBUG_HANDLE) {
++		if (fr.dropped_dbg++ == 0) {
++			printf("RAPH BT: controller debug log packets (ACL handle %#x) are dropped\n", QCA_DEBUG_HANDLE);
++		}
++		return;
++	}
++	bt_ctl_log_rx(fr.pk, fr.n);
++	if (ctl_enqueuedata(ref, unit, fr.pk, fr.n, 0) != 0) {
++		bt.c_full++;
++		fr.lost++;
++		printf("RAPH BT: socket full: a %u-byte packet is lost\n", fr.n);
+ 	} else {
+-		printf("RAPH BT: %s %u bytes: %s\n", dir, (unsigned)n, hex);
++		bt.c_rx += fr.n;
++	}
++}
++
++static void
++bt_ctl_feed(kern_ctl_ref ref, uint32_t unit, uint8_t b)
++{
++	if (fr.n == 0) {
++		if (b != 2 && b != 3 && b != 4) {
++			if (fr.garbage++ < 16) {
++				printf("RAPH BT: < byte %#04x outside a packet, dropped\n", b);
++			}
++			return;
++		}
++		fr.need = 0;
++	}
++	fr.pk[fr.n++] = b;
++	if (fr.need == 0) {
++		uint8_t t = fr.pk[0];
++		uint32_t hdr = t == 4 ? 3 : t == 3 ? 4 : 5;
++		if (fr.n == hdr) {
++			fr.need = hdr + (t == 4 ? fr.pk[2] : t == 3 ? fr.pk[3] : (uint32_t)(fr.pk[3] | fr.pk[4] << 8));
++			if (fr.need > sizeof(fr.pk)) {
++				printf("RAPH BT: < type %u packet of %u bytes is too long, dropped\n", t, fr.need);
++				fr.n = 0;
++				return;
++			}
++		}
++	}
++	if (fr.need != 0 && fr.n == fr.need) {
++		bt_ctl_deliver(ref, unit);
++		fr.n = 0;
+ 	}
+ }
+ 
+-/* the poller, without locks of the socket layer held: ring -> socket, at most 16 chunks a round */
++/* the poller, without locks of the socket layer held: ring -> framer -> socket */
+ static void
+ bt_ctl_push(void)
+ {
++	uint8_t buf[512];
+ 	for (unsigned loops = 0; loops < 16; loops++) {
+ 		lck_mtx_lock(&raph_bt_ctl);
+ 		if (!bt.c_conn) {
+@@ -682,26 +772,24 @@ bt_ctl_push(void)
+ 			return;
+ 		}
+ 		kern_ctl_ref ref = bt.c_ref;
+-		uint32_t unit = bt.c_unit, ep = bt.c_epoch, h = bt.head, t = bt.tail;
+-		lck_mtx_unlock(&raph_bt_ctl);
+-		if (h == t) {
+-			return;
++		uint32_t unit = bt.c_unit, h = bt.head, t = bt.tail;
++		if (fr.epoch != bt.c_epoch) {
++			fr.epoch = bt.c_epoch;
++			fr.n = 0;
+ 		}
+-		uint32_t n = h > t ? h - t : RING - t;
+-		if (n > BT_CHUNK) {
+-			n = BT_CHUNK;
++		uint32_t n = h >= t ? h - t : RING - t;
++		if (n > sizeof(buf)) {
++			n = sizeof(buf);
+ 		}
+-		if (ctl_enqueuedata(ref, unit, &bt.ring[t], n, 0) != 0) {
+-			bt.c_full++;            /* socket buffer full: the bytes stay in the ring */
++		memcpy(buf, &bt.ring[t], n);
++		bt.tail = (t + n) % RING;
++		lck_mtx_unlock(&raph_bt_ctl);
++		if (n == 0) {
+ 			return;
+ 		}
+-		bt_ctl_log("RX", &bt.ring[t], n);
+-		lck_mtx_lock(&raph_bt_ctl);
+-		if (bt.c_epoch == ep) {
+-			bt.tail = (t + n) % RING;
++		for (uint32_t i = 0; i < n; i++) {
++			bt_ctl_feed(ref, unit, buf[i]);
+ 		}
+-		lck_mtx_unlock(&raph_bt_ctl);
+-		bt.c_rx += n;
+ 	}
+ }
+ 
+@@ -722,7 +810,7 @@ bt_ctl_connect(kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinfo)
+ 	bt.c_unit = sac->sc_unit;
+ 	bt.c_epoch++;
+ 	bt.tail = bt.head;              /* nothing stale for the new client */
+-	bt.c_log = 40;
++	bt.c_log = 400;
+ 	lck_mtx_unlock(&raph_bt_ctl);
+ 	*unitinfo = NULL;
+ 	printf("RAPH BT: %s: client connected (unit %u, controller %s, %u baud, pid %d %s)\n", BT_CTL_NAME,
+@@ -741,12 +829,13 @@ bt_ctl_disconnect(__unused kern_ctl_ref ref, u_int32_t unit, __unused void *unit
+ 	}
+ 	lck_mtx_unlock(&raph_bt_ctl);
+ 	printf("RAPH BT: %s: client disconnected (unit %u): rx %llu tx %llu bytes, socket full %llu, tx errors %llu, "
+-	    "ring overruns %llu\n", BT_CTL_NAME, unit, bt.c_rx, bt.c_tx, bt.c_full, bt.c_txerr, bt.overruns);
++	    "ring overruns %llu, debug packets dropped %llu, stray bytes %llu\n", BT_CTL_NAME, unit, bt.c_rx, bt.c_tx,
++	    bt.c_full, bt.c_txerr, bt.overruns, fr.dropped_dbg, fr.garbage);
+ 	return 0;
+ }
+ 
+ static errno_t
+-bt_ctl_send(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo, mbuf_t m,
++bt_ctl_send(kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mbuf_t m,
+     __unused int flags)
+ {
+ 	for (mbuf_t seg = m; seg != NULL; seg = mbuf_next(seg)) {
+@@ -755,7 +844,14 @@ bt_ctl_send(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *u
+ 			continue;
+ 		}
+ 		const uint8_t *d = (const uint8_t *)mbuf_data(seg);
+-		bt_ctl_log("TX", d, len);
++		bt_ctl_log_tx(d, len);
++		/* raphbtvsc=1: vendor commands (OGF 0x3f, Apple's and Broadcom's) answered here with success */
++		if (bt.vsc && len >= 4 && d[0] == 1 && (d[2] >> 2) == 0x3fu && len == 4u + d[3]) {
++			uint8_t ev[7] = { 4, 0x0e, 4, 1, d[1], d[2], 0 };
++			(void)ctl_enqueuedata(ref, unit, ev, sizeof(ev), 0);
++			printf("RAPH BT: < complete %#06x status 0 (answered by the kernel)\n", d[1] | d[2] << 8);
++			continue;
++		}
+ 		if (bt_tx(d, (uint32_t)len) != 0) {
+ 			bt.c_txerr++;
+ 		} else {
+@@ -890,6 +986,7 @@ raphael_bt_init(void)
+ 	if (kernel_thread_start(bt_poll_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	(void)PE_parse_boot_argn("raphbtvsc", &bt.vsc, sizeof(bt.vsc));
+ 	bt_ctl_register();
+ 	printf("RAPH BT: /dev/raphael-bt ready (UART set up at first open)\n");
+ }
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index 9519bb5..d6faecc 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -138,6 +138,9 @@
+ #include <os/system_event_log.h>
+ 
+ #include <pexpert/pexpert.h>
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
+ 
+ #include <kdp/kdp_dyld.h>
+ 
+@@ -1658,6 +1661,24 @@ exit_with_reason(proc_t p, int rv, int *retval, boolean_t thread_can_terminate,
+ 	}
+ #endif
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* raphael bring-up: why daemons under test leave (boot-arg exitlog=1 logs every process) */
++	{
++		static int exitlog = -1;
++		if (exitlog < 0) {
++			int v = 0;
++			(void)PE_parse_boot_argn("exitlog", &v, sizeof(v));
++			exitlog = v;
++		}
++		if (exitlog || !strncmp(p->p_comm, "bluetoothd", sizeof(p->p_comm)) ||
++		    !strncmp(p->p_comm, "bluetool", sizeof(p->p_comm))) {
++			printf("exit %s[%d]: status %d signal %d, reason %s %u/%llu\n", p->p_comm, proc_getpid(p),
++			    WIFEXITED(rv) ? WEXITSTATUS(rv) : -1, WIFSIGNALED(rv) ? WTERMSIG(rv) : 0,
++			    exit_reason ? "namespace/code" : "none", exit_reason ? exit_reason->osr_namespace : 0,
++			    exit_reason ? (unsigned long long)exit_reason->osr_code : 0ull);
++		}
++	}
++#endif
+ 	/*
+ 	 * If a thread in this task has already
+ 	 * called exit(), then halt any others
+-- 
+2.43.0
+
