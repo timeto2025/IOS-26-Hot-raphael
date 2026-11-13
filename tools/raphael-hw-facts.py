@@ -2,6 +2,7 @@
 """Dump the device-tree nodes the next raphael drivers need (read-only).
 
     tools/raphael-hw-facts.py IMG [IMG ...] > raphael-hw-facts.txt
+    RAW=mi2s-quat,tfa98xx tools/raphael-hw-facts.py IMG   (all properties of matching nodes)
 
 IMG: any image with device trees in it: the phone's boot.img (backup/boot.img), the HackiOS
 images/twrp-original.img, or a dtbo.img (Xiaomi puts most board devices in the dtbo overlays).
@@ -79,6 +80,26 @@ def dump(blob, label):
     print(f'  ({seen} nodes)')
 
 
+def fmt_any(v):
+    t = v.rstrip(b'\0')
+    if t and all(32 <= c < 127 or c == 0 for c in t) and not v.startswith(b'\0'):
+        return '"' + t.replace(b'\0', b'" "').decode() + '"'
+    if len(v) % 4 == 0 and len(v) <= 256:
+        return '<' + ' '.join(f'0x{x:x}' for x in wifi_facts.cells(v)) + '>'
+    return f'<{len(v)} bytes>'
+
+
+def dump_raw(blob, label, keys):
+    """RAW=a,b,...: every property of the nodes whose path contains one of the strings (and their children)."""
+    root = fdt.parse(blob)
+    for n in root.walk():
+        if not any(k in n.path for k in keys):
+            continue
+        print(f'  {label}: {n.path}')
+        for k, v in sorted(n.props.items()):
+            print(f'      {k} = {fmt_any(v)}')
+
+
 def dtbo_entries(img):
     """Android dtbo.img: header 'd7b7ab1e', then entries (size, offset) pointing at FDT overlays."""
     if img[:4] != b'\xd7\xb7\xab\x1e':
@@ -100,6 +121,9 @@ def main():
         print(f'#### {path}: {len(blobs)} device tree(s)')
         for i, blob in enumerate(blobs):
             try:
+                if os.environ.get('RAW'):
+                    dump_raw(blob, f'{os.path.basename(path)} #{i}', os.environ['RAW'].split(','))
+                    continue
                 dump(blob, f'{os.path.basename(path)} #{i}')
             except Exception as e:  # noqa: BLE001
                 print(f'== {os.path.basename(path)} #{i}: unreadable ({e})')
