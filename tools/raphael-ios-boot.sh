@@ -81,7 +81,7 @@ CANVAS_H=${CANVAS_H:-2436}
 if [[ -z "${BT:-}" ]]; then ls "$ROOT"/work/fw/bt/crbtfw*.tlv >/dev/null 2>&1 && BT=1 || BT=0; fi
 bt_addr_args=()
 [[ -n "${BT_ADDR:-}" ]] && bt_addr_args=(--bt-addr "$BT_ADDR")
-[[ "${BT:-0}" == 1 ]] && bt_addr_args+=(--bt-node --bt-transport "${BT_TRANSPORT_ENCODING:-0}")
+[[ "${BT:-0}" == 1 ]] && bt_addr_args+=(--bt-node --bt-transport "${BT_TRANSPORT_ENCODING:-3}")
 python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael --canvas-height "$CANVAS_H" "${bt_addr_args[@]}"
 
 overlay_args=(-o "$WORK/ios26-overlay-raphael.tar" --root-img "$ROOTIMG"
@@ -144,9 +144,10 @@ for f in "$ROOT"/work/fw/bt/crbtfw*.tlv "$ROOT"/work/fw/bt/crnv*.bin; do
 done
 [[ $n -gt 0 ]] && echo "Bluetooth: $n firmware file(s) staged at /var/local/fw/bt"
 # Daemons that only crash-loop on raphael (no Bluetooth driver yet, no SEP): STRIP_JOBS="" keeps them all.
-# BT=1 (default when work/fw/bt has the firmware): btup at boot and bluetoothd on /dev/raphael-bt (kernel 0168+).
+# BT=1 (default when work/fw/bt has the firmware): bluetoothd started through btup, on the kernel control
+# com.apple.uart.bluetooth (kernel 0169+), BlueTool replaced by /var/local/bin/bluetool.
 if [[ "$BT" == 1 ]]; then
-	overlay_args+=(--bluetooth "${BT_TRANSPORT:-H4:POSIX:/dev/raphael-bt,115200}")
+	overlay_args+=(--bluetooth "${BT_TRANSPORT:-H4BC:POSIX:com.apple.uart.bluetooth,115200}")
 	STRIP_JOBS=${STRIP_JOBS-com.apple.fairplayd.H2 com.apple.seputil}
 else
 	STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}

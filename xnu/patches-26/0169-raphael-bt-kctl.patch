@@ -1,0 +1,328 @@
+From deeddae3891052765a306f76bd6269058e626c65 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 05:03:00 +0300
+Subject: [PATCH] raphael BT: kernel control com.apple.uart.bluetooth for
+ bluetoothd, firmware-ready flag for btup
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c | 249 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 249 insertions(+)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index 62fbe6d..2026453 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -15,6 +15,15 @@
+  * rate, from the DFS level that divides it exactly), RBT_SET_FLOW (honour CTS), RBT_FLUSH, and the termios
+  * ioctls a POSIX H4 transport issues (accepted; the rate in c_ospeed is applied). Polled FIFO mode, a 64 KiB
+  * receive ring. raphbt=0 turns it off.
++ *
++ * The iOS side: bluetoothd and BlueTool reach an A-series UART controller through a kernel control socket
++ * (PF_SYSTEM, SOCK_STREAM, SYSPROTO_CONTROL) named com.apple.uart.bluetooth, a plain H4 byte stream, termios
++ * through get/setsockopt with TIOCGETA/TIOCSETA as the option names (facts from the public analysis of the
++ * iOS 16/18 binaries in the beryllium port's notes; this code is ours). The same UART and ring serve it: while a
++ * client is connected the poller hands the received bytes to the socket. The controller's rate is set by btup
++ * (vendor command and RBT_SET_BAUD) before bluetoothd starts, so a termios rate request is answered with the
++ * rate in effect and not applied. RBT_SET_READY / RBT_GET_READY: btup marks the firmware as loaded, so a
++ * restarted bluetoothd does not load it again.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -29,6 +38,8 @@
+ #include <sys/ttycom.h>
+ #include <sys/termios.h>
+ #include <sys/vnode.h>
++#include <sys/kern_control.h>
++#include <sys/kpi_mbuf.h>
+ #include <miscfs/devfs/devfs.h>
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+@@ -115,10 +126,21 @@ static struct {
+ 	uint64_t rx_bytes, tx_bytes, overruns;
+ 	struct selinfo sel;
+ 	int rx_chan, poll_chan;
++	uint32_t ready;                 /* btup: firmware loaded */
++	/* the kernel control */
++	kern_ctl_ref c_ref;
++	bool c_conn;
++	uint32_t c_unit, c_epoch;
++	uint64_t c_rx, c_tx, c_full, c_txerr;
++	unsigned c_log;
++	uint32_t tio_iflag, tio_oflag, tio_lflag;
++	uint8_t tio_cc[20];
+ } bt;
+ static LCK_GRP_DECLARE(raph_bt_grp, "raph-bt");
+ static LCK_MTX_DECLARE(raph_bt_tx, &raph_bt_grp);
+ static LCK_MTX_DECLARE(raph_bt_setup, &raph_bt_grp);
++static LCK_MTX_DECLARE(raph_bt_ctl, &raph_bt_grp);
++static void bt_ctl_push(void);
+ 
+ static inline uint32_t
+ rd(vm_offset_t b, uint32_t o)
+@@ -406,6 +428,9 @@ bt_poll_thread(void *arg __unused, wait_result_t wr_ __unused)
+ 				wakeup(&bt.rx_chan);
+ 				selwakeup(&bt.sel);
+ 			}
++			if (bt.c_conn) {
++				bt_ctl_push();
++			}
+ 		}
+ 		uint64_t deadline;
+ 		clock_interval_to_deadline(bt.up ? 1 : 200, NSEC_PER_MSEC, &deadline);
+@@ -459,6 +484,8 @@ bt_tx(const uint8_t *p, uint32_t n)
+ #define RBT_SET_FLOW    _IOW('B', 2, uint32_t)
+ #define RBT_FLUSH       _IO('B', 3)
+ #define RBT_STATS       _IOR('B', 4, uint64_t[4])
++#define RBT_SET_READY   _IOW('B', 5, uint32_t)
++#define RBT_GET_READY   _IOR('B', 6, uint32_t)
+ 
+ static int
+ bt_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
+@@ -541,6 +568,13 @@ bt_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unus
+ 		s[3] = bt.baud;
+ 		return 0;
+ 	}
++	case RBT_SET_READY:
++		bt.ready = *(uint32_t *)data;
++		printf("RAPH BT: btup: controller %s\n", bt.ready ? "ready (firmware loaded)" : "not ready");
++		return 0;
++	case RBT_GET_READY:
++		*(uint32_t *)data = bt.ready;
++		return 0;
+ 	case FIONREAD:
+ 		*(int *)data = (int)((bt.head + RING - bt.tail) % RING);
+ 		return 0;
+@@ -601,6 +635,220 @@ bt_select(__unused dev_t dev, int which, void *wql, struct proc *p)
+ 	return 0;
+ }
+ 
++
++/* ---- the kernel control com.apple.uart.bluetooth ---- */
++#define BT_CTL_NAME     "com.apple.uart.bluetooth"
++#define BT_TIOCGETA     0x40487413u     /* _IOR('t', 19, struct termios): the option names userland passes */
++#define BT_TIOCSETA     0x80487414u
++#define BT_TIOCSETAW    0x80487415u
++#define BT_TIOCSETAF    0x80487416u
++#define BT_CHUNK        4096u
++
++/* struct termios as LP64 userland lays it out: tcflag_t and speed_t are unsigned long */
++struct bt_utermios {
++	uint64_t c_iflag, c_oflag, c_cflag, c_lflag;
++	uint8_t c_cc[20];
++	uint64_t c_ispeed, c_ospeed;
++};
++_Static_assert(sizeof(struct bt_utermios) == 72, "LP64 struct termios");
++
++static void
++bt_ctl_log(const char *dir, const uint8_t *p, size_t n)
++{
++	char hex[3 * 12 + 1];
++	size_t o = 0;
++	if (bt.c_log == 0) {
++		return;
++	}
++	bt.c_log--;
++	for (size_t i = 0; i < n && i < 12; i++) {
++		o += (size_t)snprintf(hex + o, sizeof(hex) - o, "%02x ", p[i]);
++	}
++	if (dir[0] == 'T' && n >= 4 && p[0] == 1) {
++		printf("RAPH BT: %s cmd %#06x plen %u (%u bytes): %s\n", dir, p[1] | p[2] << 8, p[3], (unsigned)n, hex);
++	} else {
++		printf("RAPH BT: %s %u bytes: %s\n", dir, (unsigned)n, hex);
++	}
++}
++
++/* the poller, without locks of the socket layer held: ring -> socket, at most 16 chunks a round */
++static void
++bt_ctl_push(void)
++{
++	for (unsigned loops = 0; loops < 16; loops++) {
++		lck_mtx_lock(&raph_bt_ctl);
++		if (!bt.c_conn) {
++			lck_mtx_unlock(&raph_bt_ctl);
++			return;
++		}
++		kern_ctl_ref ref = bt.c_ref;
++		uint32_t unit = bt.c_unit, ep = bt.c_epoch, h = bt.head, t = bt.tail;
++		lck_mtx_unlock(&raph_bt_ctl);
++		if (h == t) {
++			return;
++		}
++		uint32_t n = h > t ? h - t : RING - t;
++		if (n > BT_CHUNK) {
++			n = BT_CHUNK;
++		}
++		if (ctl_enqueuedata(ref, unit, &bt.ring[t], n, 0) != 0) {
++			bt.c_full++;            /* socket buffer full: the bytes stay in the ring */
++			return;
++		}
++		bt_ctl_log("RX", &bt.ring[t], n);
++		lck_mtx_lock(&raph_bt_ctl);
++		if (bt.c_epoch == ep) {
++			bt.tail = (t + n) % RING;
++		}
++		lck_mtx_unlock(&raph_bt_ctl);
++		bt.c_rx += n;
++	}
++}
++
++static errno_t
++bt_ctl_connect(kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinfo)
++{
++	if (!bt_setup()) {
++		return ENXIO;
++	}
++	lck_mtx_lock(&raph_bt_ctl);
++	if (bt.c_conn) {
++		lck_mtx_unlock(&raph_bt_ctl);
++		printf("RAPH BT: %s: second client refused (unit %u is connected)\n", BT_CTL_NAME, bt.c_unit);
++		return EBUSY;
++	}
++	bt.c_conn = true;
++	bt.c_ref = ref;
++	bt.c_unit = sac->sc_unit;
++	bt.c_epoch++;
++	bt.tail = bt.head;              /* nothing stale for the new client */
++	bt.c_log = 40;
++	lck_mtx_unlock(&raph_bt_ctl);
++	*unitinfo = NULL;
++	printf("RAPH BT: %s: client connected (unit %u, controller %s, %u baud, pid %d %s)\n", BT_CTL_NAME,
++	    sac->sc_unit, bt.ready ? "ready" : "NOT READY (btup has not loaded the firmware)", bt.baud,
++	    proc_selfpid(), current_proc() ? proc_best_name(current_proc()) : "?");
++	return 0;
++}
++
++static errno_t
++bt_ctl_disconnect(__unused kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo)
++{
++	lck_mtx_lock(&raph_bt_ctl);
++	if (bt.c_conn && bt.c_unit == unit) {
++		bt.c_conn = false;
++		bt.c_epoch++;
++	}
++	lck_mtx_unlock(&raph_bt_ctl);
++	printf("RAPH BT: %s: client disconnected (unit %u): rx %llu tx %llu bytes, socket full %llu, tx errors %llu, "
++	    "ring overruns %llu\n", BT_CTL_NAME, unit, bt.c_rx, bt.c_tx, bt.c_full, bt.c_txerr, bt.overruns);
++	return 0;
++}
++
++static errno_t
++bt_ctl_send(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo, mbuf_t m,
++    __unused int flags)
++{
++	for (mbuf_t seg = m; seg != NULL; seg = mbuf_next(seg)) {
++		size_t len = mbuf_len(seg);
++		if (len == 0) {
++			continue;
++		}
++		const uint8_t *d = (const uint8_t *)mbuf_data(seg);
++		bt_ctl_log("TX", d, len);
++		if (bt_tx(d, (uint32_t)len) != 0) {
++			bt.c_txerr++;
++		} else {
++			bt.c_tx += len;
++		}
++	}
++	mbuf_freem(m);
++	return 0;
++}
++
++static void
++bt_ctl_termios(struct bt_utermios *t)
++{
++	bzero(t, sizeof(*t));
++	t->c_iflag = bt.tio_iflag;
++	t->c_oflag = bt.tio_oflag;
++	t->c_lflag = bt.tio_lflag;
++	memcpy(t->c_cc, bt.tio_cc, sizeof(t->c_cc));
++	t->c_cflag = CS8 | CREAD | CLOCAL | (bt.flow ? CRTSCTS : 0);
++	t->c_ispeed = t->c_ospeed = bt.baud;
++}
++
++static errno_t
++bt_ctl_setopt(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo, int opt, void *data,
++    size_t len)
++{
++	struct bt_utermios t;
++	switch ((uint32_t)opt) {
++	case BT_TIOCSETA:
++	case BT_TIOCSETAW:
++	case BT_TIOCSETAF:
++		if (data == NULL || len != sizeof(t)) {
++			return EINVAL;
++		}
++		memcpy(&t, data, sizeof(t));
++		printf("RAPH BT: %s: termios set (%#x): cflag %#llx speed %llu (line stays at %u baud, flow %s)\n",
++		    BT_CTL_NAME, (uint32_t)opt, t.c_cflag, t.c_ospeed, bt.baud, bt.flow ? "on" : "off");
++		bt.tio_iflag = (uint32_t)t.c_iflag;
++		bt.tio_oflag = (uint32_t)t.c_oflag;
++		bt.tio_lflag = (uint32_t)t.c_lflag;
++		memcpy(bt.tio_cc, t.c_cc, sizeof(bt.tio_cc));
++		if ((uint32_t)opt == BT_TIOCSETAF) {
++			lck_mtx_lock(&raph_bt_ctl);
++			bt.tail = bt.head;
++			lck_mtx_unlock(&raph_bt_ctl);
++		}
++		return 0;
++	default:
++		printf("RAPH BT: %s: setsockopt %#x (%u bytes) not supported\n", BT_CTL_NAME, (uint32_t)opt, (unsigned)len);
++		return ENOTSUP;
++	}
++}
++
++static errno_t
++bt_ctl_getopt(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo, int opt, void *data,
++    size_t *len)
++{
++	struct bt_utermios t;
++	if ((uint32_t)opt != BT_TIOCGETA) {
++		printf("RAPH BT: %s: getsockopt %#x not supported\n", BT_CTL_NAME, (uint32_t)opt);
++		return ENOTSUP;
++	}
++	if (data == NULL) {
++		*len = sizeof(t);
++		return 0;
++	}
++	if (*len < sizeof(t)) {
++		return EINVAL;
++	}
++	bt_ctl_termios(&t);
++	memcpy(data, &t, sizeof(t));
++	*len = sizeof(t);
++	return 0;
++}
++
++static void
++bt_ctl_register(void)
++{
++	struct kern_ctl_reg r;
++	bzero(&r, sizeof(r));
++	strlcpy(r.ctl_name, BT_CTL_NAME, sizeof(r.ctl_name));
++	r.ctl_flags = CTL_FLAG_REG_SOCK_STREAM;         /* not privileged: bluetoothd runs as mobile */
++	r.ctl_sendsize = 64 * 1024;
++	r.ctl_recvsize = 128 * 1024;
++	r.ctl_connect = bt_ctl_connect;
++	r.ctl_disconnect = bt_ctl_disconnect;
++	r.ctl_send = bt_ctl_send;
++	r.ctl_setopt = bt_ctl_setopt;
++	r.ctl_getopt = bt_ctl_getopt;
++	errno_t err = ctl_register(&r, &bt.c_ref);
++	printf("RAPH BT: kernel control %s: %d\n", BT_CTL_NAME, err);
++}
++
+ static const struct cdevsw raph_bt_cdevsw = {
+ 	.d_open       = bt_open,
+ 	.d_close      = bt_close,
+@@ -642,6 +890,7 @@ raphael_bt_init(void)
+ 	if (kernel_thread_start(bt_poll_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	bt_ctl_register();
+ 	printf("RAPH BT: /dev/raphael-bt ready (UART set up at first open)\n");
+ }
+ #endif /* SWEET_BOARD_RAPHAEL */
+-- 
+2.43.0
+

@@ -5,6 +5,18 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 05:10 MSK: Bluetooth step 3, kernel 0169 (bluetoothd on the kernel control)
+- Observed with 0168 + ADT /arm-io/bluetooth: btup loads crbtfw21/crnv21 (HCI 5.1, manufacturer 29, BD_ADDR
+  39:90:21:74:07:00); BlueTool is exec'd at ~50 s; Settings > Bluetooth highlights and then hangs.
+- Cause (facts from the beryllium port's analysis of iOS 16/18 bluetoothd/BlueTool): bluetoothd's POSIX driver opens a
+  kernel control socket named by BT_HCI_TRANSPORT (`/dev/raphael-bt` there is not one), and asks BlueTool over XPC
+  (com.apple.BlueTool) to run Broadcom boot scripts that fail on the WCN3998. Also bluetoothd started before btup.
+- 0169: `com.apple.uart.bluetooth` kernel control on the same UART/ring (termios get/setsockopt, rate stays as btup set
+  it), RBT_SET_READY/RBT_GET_READY. Image: bluetoothd's job runs `btup -w 120 -x /usr/sbin/bluetoothd`
+  (log /var/tmp/btup.log), BT_HCI_TRANSPORT=H4BC:POSIX:com.apple.uart.bluetooth,115200, BlueTool job runs
+  /var/local/bin/bluetool (answers result 0, log /var/tmp/bluetool.log), ADT transport-encoding 3, transport-speed 115200.
+- Unverified: iOS 26 names (assumed same as 18), whether bluetoothd accepts the stand-in's reply, keychain needs.
+
 ### raphael (Redmi K20 Pro), 2026-11-13 02:20 MSK: kernel 0164, darwin re-synced
 - **Kernel 0164** (patches 0152-0164): GT9886 touch, AMOLED DCS brightness, PM8150B battery % / voltage /
   current / charging (0159, 0161, 0162: cable state polled every 1 s), PM8150L torch, PM8150B ERM haptics (0160),

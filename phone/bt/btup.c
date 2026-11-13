@@ -3,8 +3,12 @@
  *
  * btup: bring the K20 Pro's WCN3990 Bluetooth controller up over /dev/raphael-bt (bsd/dev/raphael_bt.c).
  *
- *   btup [-d DEV] [-f FWDIR] [-b BAUD] [-n NN] [-s SECONDS_TO_WAIT_FIRST]   (defaults /dev/raphael-bt, /var/local/fw/bt, 3000000;
- *                                               NN: firmware number in hex, default from the ROM version)
+ *   btup [-d DEV] [-f FWDIR] [-b BAUD] [-n NN] [-s SECONDS_TO_WAIT_FIRST] [-w SECONDS_TO_KEEP_TRYING]
+ *        [-x PROGRAM ARGS...]          (defaults /dev/raphael-bt, /var/local/fw/bt, 3000000;
+ *                                       NN: firmware number in hex, default from the ROM version)
+ *
+ *   -x: afterwards run PROGRAM in this process (bluetoothd's launchd job: the controller is up before bluetoothd
+ *   opens it). The kernel remembers a finished bring-up (RBT_SET_READY), so a restarted bluetoothd starts at once.
  *
  * The steps of Qualcomm's WCN399x bring-up (facts from Linux btqca.h / hci_qca.c, no code taken):
  *   1. power pulses at 2400 baud: 0xC0 (off), then 0xFC (on); 100 ms later the controller listens at 115200
@@ -29,6 +33,8 @@
 #define RBT_SET_BAUD    _IOW('B', 1, uint32_t)
 #define RBT_SET_FLOW    _IOW('B', 2, uint32_t)
 #define RBT_FLUSH       _IO('B', 3)
+#define RBT_SET_READY   _IOW('B', 5, uint32_t)
+#define RBT_GET_READY   _IOR('B', 6, uint32_t)
 
 static int fd = -1;
 
@@ -283,10 +289,9 @@ download(const char *path, int is_patch)
 	return 0;
 }
 
-int
-main(int argc, char **argv)
+static int
+bringup(int argc, char **argv)
 {
-	setvbuf(stdout, NULL, _IOLBF, 0);
 	const char *dev = "/dev/raphael-bt", *fwdir = "/var/local/fw/bt";
 	uint32_t baud = 3000000;
 	for (int i = 1; i + 1 < argc; i += 2) {
@@ -296,9 +301,6 @@ main(int argc, char **argv)
 			fwdir = argv[i + 1];
 		} else if (!strcmp(argv[i], "-b")) {
 			baud = (uint32_t)strtoul(argv[i + 1], NULL, 0);
-		} else if (!strcmp(argv[i], "-s")) {
-			/* at boot: wait for the Wi-Fi (wland powers the chip's supplies) */
-			sleep((unsigned)strtoul(argv[i + 1], NULL, 0));
 		}
 	}
 	fd = open(dev, O_RDWR);
@@ -428,5 +430,67 @@ main(int argc, char **argv)
 		printf("btup: BD_ADDR %02x:%02x:%02x:%02x:%02x:%02x\n", ev[9], ev[8], ev[7], ev[6], ev[5], ev[4]);
 	}
 	printf("btup: done; the controller runs at %u baud with CTS/RTS on %s\n", ri > 0 ? baud : 115200, dev);
+	uint32_t yes = 1;
+	ioctl(fd, RBT_SET_READY, &yes);
 	return 0;
+}
+
+int
+main(int argc, char **argv)
+{
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	const char *dev = "/dev/raphael-bt", *exec_path = NULL;
+	unsigned wait_s = 0;
+	int exec_at = -1;
+	for (int i = 1; i + 1 < argc; i += 2) {
+		if (!strcmp(argv[i], "-d")) {
+			dev = argv[i + 1];
+		} else if (!strcmp(argv[i], "-s")) {
+			sleep((unsigned)strtoul(argv[i + 1], NULL, 0));
+		} else if (!strcmp(argv[i], "-w")) {
+			wait_s = (unsigned)strtoul(argv[i + 1], NULL, 0);
+		} else if (!strcmp(argv[i], "-x")) {
+			/* -x PROGRAM [ARGS...]: the rest of the command line is run in this process afterwards */
+			exec_path = argv[i + 1];
+			exec_at = i + 1;
+			argc = i;
+			break;
+		}
+	}
+	uint32_t ready = 0;
+	int dfd = open(dev, O_RDWR);
+	if (dfd >= 0) {
+		ioctl(dfd, RBT_GET_READY, &ready);
+		close(dfd);
+	}
+	int rc = 0;
+	if (ready) {
+		printf("btup: the controller is up already (firmware loaded earlier)\n");
+	} else {
+		/* at boot the chip's supplies come with the Wi-Fi (wland): try again until it answers */
+		uint64_t end = now_ms() + (uint64_t)wait_s * 1000u;
+		for (unsigned attempt = 1;; attempt++) {
+			rc = bringup(argc, argv);
+			if (fd >= 0) {
+				close(fd);
+				fd = -1;
+			}
+			if (rc != 1 && rc != 2) {
+				break;
+			}
+			if (now_ms() + 3000u > end) {
+				break;
+			}
+			printf("btup: attempt %u failed (%d), again in 3 s\n", attempt, rc);
+			sleep(3);
+		}
+	}
+	if (exec_path) {
+		printf("btup: starting %s\n", exec_path);
+		fflush(stdout);
+		execv(exec_path, &argv[exec_at]);
+		printf("btup: %s: %s\n", exec_path, strerror(errno));
+		return 127;
+	}
+	return rc;
 }

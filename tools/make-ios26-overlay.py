@@ -476,7 +476,7 @@ def main():
     ap.add_argument('--userland-dir', help='optional extracted userland dir (Applications/, HAL/, bin/, lib/)')
     ap.add_argument('--dsc-stubs-dir', help='optional dir of de-PACd dyld_shared_cache_arm64e.* stub subcaches')
     ap.add_argument('--bluetooth', metavar='TRANSPORT',
-                    help='run btup at boot and give bluetoothd BT_HCI_TRANSPORT (e.g. H4:POSIX:/dev/raphael-bt,115200)')
+                    help='bluetoothd through btup with BT_HCI_TRANSPORT (e.g. H4BC:POSIX:com.apple.uart.bluetooth,115200), BlueTool stand-in')
     ap.add_argument('--strip-job', action='append', metavar='LABEL',
                     help='remove the LaunchDaemon with this Label (repeatable)')
     ap.add_argument('--mtl2-clients',
@@ -669,26 +669,42 @@ def main():
                 'StandardErrorPath': '/var/local/wland.log', 'StandardOutPath': '/var/local/wland.log',
             }
 
-    # --bluetooth TRANSPORT: the phone's own Bluetooth (raphael: btup loads the WCN3998, then bluetoothd talks
-    # H4 to /dev/raphael-bt). org.iosonpixel.btup runs once at load (it waits for the Wi-Fi's supplies itself);
-    # bluetoothd gets BT_HCI_TRANSPORT and is restarted by launchd until the controller answers.
+    # --bluetooth TRANSPORT: the phone's own Bluetooth (raphael). bluetoothd reaches a UART controller through the
+    # kernel control com.apple.uart.bluetooth (patch 0169), TRANSPORT e.g. H4BC:POSIX:com.apple.uart.bluetooth,115200.
+    # bluetoothd's job runs btup first (-x: btup loads the WCN3998's firmware, retrying until the Wi-Fi has powered
+    # the chip, then execs bluetoothd in the same process), so bluetoothd never opens an unloaded controller.
+    # BlueTool's Broadcom scripts cannot boot this chip: its job runs /var/local/bin/bluetool, which answers
+    # bluetoothd's requests with success. Logs: /var/tmp/btup.log (btup + bluetoothd), /var/tmp/bluetool.log.
     if args.bluetooth:
-        bt_key = '/System/Library/LaunchDaemons/org.iosonpixel.btup.plist'
-        jobs[bt_key] = {
-            'Label': 'org.iosonpixel.btup',
-            'ProgramArguments': ['/var/local/bin/btup', '-b', '115200', '-s', '35'],
-            'RunAtLoad': True, 'KeepAlive': False, 'UserName': 'root', 'ProcessType': 'Interactive',
-            'StandardOutPath': '/var/local/btup.log', 'StandardErrorPath': '/var/local/btup.log',
-        }
+        jobs.pop('/System/Library/LaunchDaemons/org.iosonpixel.btup.plist', None)
         hits = [k for k, j in jobs.items() if isinstance(j, dict) and j.get('Label') == 'com.apple.bluetoothd']
         for k in hits:
-            env = dict(jobs[k].get('EnvironmentVariables') or {})
+            job = jobs[k]
+            env = dict(job.get('EnvironmentVariables') or {})
             env['BT_HCI_TRANSPORT'] = args.bluetooth
-            env['BT_BAUDRATE'] = '115200'
-            jobs[k]['EnvironmentVariables'] = env
-            print(f'bluetoothd: BT_HCI_TRANSPORT={args.bluetooth} ({k})')
+            env['BT_BAUDRATE'] = args.bluetooth.rsplit(',', 1)[1] if ',' in args.bluetooth else '115200'
+            env.pop('BT_DEVICE_ADDRESS', None)
+            job['EnvironmentVariables'] = env
+            orig = list(job.get('ProgramArguments') or [])
+            prog = job.pop('Program', None) or (orig[0] if orig else '/usr/sbin/bluetoothd')
+            if not orig:
+                orig = [prog]
+            if orig[0] != '/var/local/bin/btup':
+                job['ProgramArguments'] = ['/var/local/bin/btup', '-b', '115200', '-w', '120', '-x', prog] + orig[1:]
+            job['StandardOutPath'] = job['StandardErrorPath'] = '/var/tmp/btup.log'
+            print(f'bluetoothd: BT_HCI_TRANSPORT={args.bluetooth}, started through btup ({k}, user {job.get("UserName")})')
         if not hits:
             print('bluetoothd: warning: no com.apple.bluetoothd job (stripped?)')
+        bt_tool = [k for k, j in jobs.items() if isinstance(j, dict) and j.get('Label') == 'com.apple.BlueTool']
+        for k in bt_tool:
+            job = jobs[k]
+            job.pop('Program', None)
+            job['ProgramArguments'] = ['/var/local/bin/bluetool', '-R']
+            job['StandardErrorPath'] = '/var/tmp/bluetool.log'
+            print(f'BlueTool: /var/local/bin/bluetool answers com.apple.BlueTool ({k}, mach services '
+                  f'{sorted((job.get("MachServices") or {}).keys())})')
+        if not bt_tool:
+            print('BlueTool: warning: no com.apple.BlueTool job')
 
     if args.wland_autostart:
         wl = jobs.get('/System/Library/LaunchDaemons/org.iosonpixel.wland.plist')
