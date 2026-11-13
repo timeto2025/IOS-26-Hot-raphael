@@ -242,21 +242,32 @@ main(int argc, char **argv)
 	ioctl(fd, RBT_FLUSH);
 
 	/* 2. versions */
-	uint8_t p = 0x19, ev[256];
-	int evlen = 0;
-	if (cmd(0xfc00, &p, 1, ev, &evlen, 2000) < 0) {
-		printf("btup: the controller does not answer at 115200 after the power pulse\n");
+	/* the answer: Command Complete (0x0e) or a vendor event (0xff) with EDL 0x00 0x19 and the 12-byte record;
+	 * other events (the controller's own hellos) are printed and skipped */
+	uint8_t p = 0x19, ev[256], code = 0;
+	int evlen = 0, at = -1;
+	if (send_cmd(0xfc00, &p, 1)) {
 		return 2;
 	}
-	int at = -1;
-	for (int i = 0; i + 12 < evlen; i++) {
-		if (ev[i] == 0x19) {
-			at = i + 1;
+	for (int tries = 0; tries < 6 && at < 0; tries++) {
+		evlen = read_event(&code, ev, 2000);
+		if (evlen < 0) {
 			break;
+		}
+		printf("btup: event %#04x, %d bytes:", code, evlen);
+		for (int i = 0; i < evlen; i++) {
+			printf(" %02x", ev[i]);
+		}
+		printf("\n");
+		for (int i = 0; i + 1 + 12 <= evlen; i++) {
+			if (ev[i] == 0x19 && (i == 0 || ev[i - 1] == 0x00)) {
+				at = i + 1;
+				break;
+			}
 		}
 	}
 	if (at < 0) {
-		printf("btup: version answer without its record (%d bytes)\n", evlen);
+		printf("btup: no version record in the answers%s\n", evlen < 0 ? " (nothing more within 2 s)" : "");
 		return 2;
 	}
 	uint32_t product = ev[at] | ev[at + 1] << 8 | ev[at + 2] << 16 | (uint32_t)ev[at + 3] << 24;
