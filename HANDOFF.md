@@ -5,6 +5,12 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 06:25 MSK: kernel 0173 (vendor answers echo the selector)
+- 0172 on the phone: the vendor commands now "complete with status 701" without the chip's 0xff events, but
+  BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS (0xfce2 selector 0x2c) still times out after 15 s (reason 3602).
+- 0173: the kernel's answer to a vendor command with parameters carries the first parameter byte (the selector)
+  after the status. Next if it still waits: raphbtvsc=2 (status 0) via EXTRA_ARGS.
+
 ### raphael, 2026-11-13 06:10 MSK: kernel 0172 (vendor commands answered locally)
 - With 0171 the HCI init passes (0x0c5b/0x0c7a answered, then Write_Local_Name, EIR, class...). Vendor commands
   0xfdfd, 0xfff2, 0xfdda, 0xfce2 (sub 0x2a, 0x2c) get from the WCN3998 a vendor event `ff 05 00 00 10 0a` plus

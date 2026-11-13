@@ -1,0 +1,39 @@
+From 071db9e5d29f3a31ced9933e75509d7d169461e5 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 06:19:25 +0300
+Subject: [PATCH] raphael BT: vendor command answers echo the selector byte
+ (bluetoothd matches Olympic answers by it)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index a0ef734..f259a37 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -942,8 +942,17 @@ bt_ctl_send(kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mbuf_t m,
+ 		 * (Unknown HCI Command, as the chip says, without its extra event); 2: status 0; 0: sent to the chip.
+ 		 */
+ 		if (bt.vsc && len >= 4 && d[0] == 1 && (d[2] >> 2) == 0x3fu && len == 4u + d[3]) {
+-			uint8_t ev[7] = { 4, 0x0e, 4, 1, d[1], d[2], bt.vsc == 2 ? 0 : 1 };
+-			(void)ctl_enqueuedata(ref, unit, ev, sizeof(ev), 0);
++			/*
++			 * Multiplexed vendor commands (0xfce2 "Olympic" and the like) carry a selector in their first
++			 * parameter and bluetoothd matches the answer by it: echo it back, or it waits until its 15 s
++			 * timeout (BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS, selector 0x2c).
++			 */
++			uint8_t ev[8] = { 4, 0x0e, 4, 1, d[1], d[2], bt.vsc == 2 ? 0 : 1, 0 };
++			if (d[3] >= 1) {
++				ev[2] = 5;
++				ev[7] = d[4];
++			}
++			(void)ctl_enqueuedata(ref, unit, ev, 3u + ev[2], 0);
+ 			printf("RAPH BT: < complete %#06x status %u (vendor command answered by the kernel)\n",
+ 			    d[1] | d[2] << 8, ev[6]);
+ 			continue;
+-- 
+2.43.0
+
