@@ -5,6 +5,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 17:50 MSK: Settings > Bluetooth hangs in NanoRegistry, not audio
+- oslog: BluetoothSettings loads, bluetoothd check-in fine, then Preferences looks up
+  com.apple.nano.nanoregistry.paireddeviceregistry -> "No such process", "Using synchronous remote object for
+  xpcGetDeviceCollectionWithBlock", XPC 4099, and the main thread logs nothing more (hang).
+- sweet-root-tweaks.py strips com.apple.nanoregistryd (RMX list). New overlay --keep-job; raphael-ios-boot.sh
+  KEEP_JOBS default com.apple.nanoregistryd.
+
 ### raphael, 2026-11-13 17:40 MSK: kernel 0177 (flip with one pipe), adspd pacing by speaker_running
 - Tearing: klog "flip: VIG0 0x9c000000 / VIG1 0 are not ABL's frame: one buffer" - booted from recovery, ABL
   scans out through VIG0 alone, so 0164's triple buffer never engaged (every 5 s line: flip 0, gpu N cpu 0:

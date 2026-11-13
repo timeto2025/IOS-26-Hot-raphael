@@ -501,6 +501,8 @@ def main():
     ap.add_argument('--wland-autostart', action='store_true',
                     help='raphael: start wland at boot (`wland auto`), once its firmware and carve-outs are set')
     ap.add_argument('--ssh-key', help='public key file installed as root\'s /var/root/.ssh/authorized_keys (dropbear)')
+    ap.add_argument('--keep-job', action='append', default=[],
+                    help='launchd Label to keep although sweet-root-tweaks.py strips it (repeatable)')
     ap.add_argument('--extra', action='append', default=[],
                     help='extra file SRC:DST[:OCTAL_MODE] to include in the overlay (repeatable)')
     args = ap.parse_args()
@@ -621,7 +623,7 @@ def main():
 
     plist = plistlib.loads(raw_plist)
     before_count = len(plist['LaunchDaemons'])
-    renamed, removed = tweaks.clean_launchd_plist(plist)
+    renamed, removed = tweaks.clean_launchd_plist(plist, keep=set(args.keep_job))
 
     jobs = plist['LaunchDaemons']
     # --strip-job LABEL (repeatable): daemons this phone has no hardware for and that launchd only

@@ -180,8 +180,9 @@ def ensure_idle_xpc_daemon(jobs):
     return sorted(mach_svcs)
 
 
-def clean_launchd_plist(plist):
-    """Rename _PanicOnCrash -> _PanicOnCrasX and strip hardware-absent/crash-looping LaunchDaemons."""
+def clean_launchd_plist(plist, keep=()):
+    """Rename _PanicOnCrash -> _PanicOnCrasX and strip hardware-absent/crash-looping LaunchDaemons.
+    keep: labels to leave in even though they are on the skip lists."""
     jobs = plist['LaunchDaemons']
     renamed = 0
     for job in jobs.values():
@@ -195,9 +196,10 @@ def clean_launchd_plist(plist):
         bb_job['EnvironmentVariables'] = bb_env
     removed = [
         k for k, j in jobs.items()
-        if j.get('Label') in SKIP_LABELS
+        if j.get('Label') not in keep and (
+        j.get('Label') in SKIP_LABELS
         or os.path.basename(k) in SKIP_PLISTS
-        or k.startswith(SKIP_PREFIXES)
+        or k.startswith(SKIP_PREFIXES))
     ]
     for k in removed:
         del jobs[k]

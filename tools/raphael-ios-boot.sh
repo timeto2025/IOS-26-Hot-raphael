@@ -153,6 +153,11 @@ else
 	STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}
 fi
 for j in $STRIP_JOBS; do overlay_args+=(--strip-job "$j"); done
+# Jobs the RMX1931 root strips but raphael needs: KEEP_JOBS="" strips them too. nanoregistryd answers
+# com.apple.nano.nanoregistry.paireddeviceregistry ("no watch"); without it Settings > Bluetooth hangs in
+# NanoRegistry's synchronous device-collection query.
+KEEP_JOBS=${KEEP_JOBS-com.apple.nanoregistryd}
+for j in $KEEP_JOBS; do overlay_args+=(--keep-job "$j"); done
 # Mach services whose server never answers on raphael; their clients then fail at once instead of hanging
 # (com.apple.audio.hapticd: Settings > Bluetooth hung 12 s in CoreHaptics and was killed). DROP_MACH="" keeps them.
 DROP_MACH=${DROP_MACH-com.apple.audio.hapticd}
