@@ -5,6 +5,13 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 06:40 MSK: kernel 0174 (vendor command status per opcode)
+- 0173 + raphbtvsc=2 (all vendor commands status 0 + selector): "Stack initialization complete", bluetoothd takes the
+  controller for a BCM_4378 and lists its VSCs, "Done starting up stack", then READ_PROP_LOCAL_FEATURES (0xfdda)
+  succeeds with too little data -> AssertFail bcm_vsc.c:343 `ByteStream_NumReadBytesAvail(*pBs) >= 4` -> restart.
+- 0174: raphbtvsc=1 (default) answers status 1 + selector except the opcodes in raphbtvscok=OP[.N],...
+  (default fce2): status 0 + selector + N zero bytes.
+
 ### raphael, 2026-11-13 06:25 MSK: kernel 0173 (vendor answers echo the selector)
 - 0172 on the phone: the vendor commands now "complete with status 701" without the chip's 0xff events, but
   BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS (0xfce2 selector 0x2c) still times out after 15 s (reason 3602).

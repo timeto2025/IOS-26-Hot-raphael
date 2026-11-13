@@ -1,0 +1,119 @@
+From 01dc993aea0ea4bde16cbf2cbabb345a5da84e89 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 06:34:46 +0300
+Subject: [PATCH] raphael BT: vendor commands succeed only where listed
+ (raphbtvscok, default the Olympic 0xfce2), the rest 'unknown command'
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c | 74 ++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 71 insertions(+), 3 deletions(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index f259a37..9f6d0af 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -760,6 +760,53 @@ bt_fake_parse(void)
+ 	}
+ }
+ 
++/* raphbtvscok: vendor opcodes answered with success (and N zero bytes after the selector) */
++static struct {
++	uint16_t op;
++	uint8_t extra;
++} bt_vscok[16];
++static unsigned bt_nvscok;
++
++static void
++bt_vscok_parse(void)
++{
++	char buf[128] = "fce2";
++	(void)PE_parse_boot_arg_str("raphbtvscok", buf, sizeof(buf));
++	for (const char *c = buf; *c && bt_nvscok < 16;) {
++		unsigned op = 0, n = 0, k = 0;
++		for (; *c && *c != ','; c++) {
++			if (*c == '.') {
++				k = 1;
++			} else if (k == 0 && ((*c >= '0' && *c <= '9') || ((*c | 0x20) >= 'a' && (*c | 0x20) <= 'f'))) {
++				op = op * 16u + (unsigned)(*c <= '9' ? *c - '0' : (*c | 0x20) - 'a' + 10);
++			} else if (k == 1 && *c >= '0' && *c <= '9') {
++				n = n * 10u + (unsigned)(*c - '0');
++			}
++		}
++		if (*c == ',') {
++			c++;
++		}
++		if (op != 0 && n <= 64) {
++			bt_vscok[bt_nvscok].op = (uint16_t)op;
++			bt_vscok[bt_nvscok].extra = (uint8_t)n;
++			bt_nvscok++;
++			printf("RAPH BT: vendor command %#06x answered with success (+%u bytes)\n", op, n);
++		}
++	}
++}
++
++/* -1: not listed; otherwise the extra byte count */
++static int
++bt_vscok_find(uint16_t op)
++{
++	for (unsigned i = 0; i < bt_nvscok; i++) {
++		if (bt_vscok[i].op == op) {
++			return bt_vscok[i].extra;
++		}
++	}
++	return -1;
++}
++
+ static const struct bt_fake *
+ bt_fake_find(uint16_t op)
+ {
+@@ -947,14 +994,34 @@ bt_ctl_send(kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mbuf_t m,
+ 			 * parameter and bluetoothd matches the answer by it: echo it back, or it waits until its 15 s
+ 			 * timeout (BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS, selector 0x2c).
+ 			 */
+-			uint8_t ev[8] = { 4, 0x0e, 4, 1, d[1], d[2], bt.vsc == 2 ? 0 : 1, 0 };
++			/*
++			 * Status per opcode: raphbtvscok=OPCODE[.N],... (hex opcode, N extra zero bytes after the selector;
++			 * default "fce2": the Olympic commands must succeed, BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS times out
++			 * otherwise) get status 0; the rest status 1, which bluetoothd takes as "not supported". Status 0
++			 * for everything (raphbtvsc=2) aborts bluetoothd in bcm_vsc.c on READ_PROP_LOCAL_FEATURES, whose
++			 * answer must then carry at least 4 bytes.
++			 */
++			uint16_t op = (uint16_t)(d[1] | d[2] << 8);
++			int ok = bt.vsc == 2 ? 0 : bt_vscok_find(op);
++			uint8_t ev[7 + 1 + 64];
++			bzero(ev, sizeof(ev));
++			ev[0] = 4;
++			ev[1] = 0x0e;
++			ev[2] = 4;
++			ev[3] = 1;
++			ev[4] = d[1];
++			ev[5] = d[2];
++			ev[6] = (bt.vsc == 2 || ok >= 0) ? 0 : 1;
+ 			if (d[3] >= 1) {
+ 				ev[2] = 5;
+ 				ev[7] = d[4];
+ 			}
++			if (ok > 0) {
++				ev[2] = (uint8_t)(ev[2] + ok);
++			}
+ 			(void)ctl_enqueuedata(ref, unit, ev, 3u + ev[2], 0);
+-			printf("RAPH BT: < complete %#06x status %u (vendor command answered by the kernel)\n",
+-			    d[1] | d[2] << 8, ev[6]);
++			printf("RAPH BT: < complete %#06x status %u, %u bytes (vendor command answered by the kernel)\n",
++			    op, ev[6], ev[2] - 4u);
+ 			continue;
+ 		}
+ 		if (bt_tx(d, (uint32_t)len) != 0) {
+@@ -1094,6 +1161,7 @@ raphael_bt_init(void)
+ 	bt.vsc = 1;
+ 	(void)PE_parse_boot_argn("raphbtvsc", &bt.vsc, sizeof(bt.vsc));
+ 	bt_fake_parse();
++	bt_vscok_parse();
+ 	bt_ctl_register();
+ 	printf("RAPH BT: /dev/raphael-bt ready (UART set up at first open)\n");
+ }
+-- 
+2.43.0
+
