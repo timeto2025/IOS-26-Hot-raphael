@@ -47,7 +47,7 @@ index 104d075..154f2cf 100644
 +			continue;
 +		}
 +		proc_t p = proc_find(pids[i]);
-+		if (p == PROC_NULL) {
++		if (p == NULL) {
 +			continue;
 +		}
 +		proc_name(pids[i], name, sizeof(name));
