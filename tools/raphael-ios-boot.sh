@@ -76,7 +76,11 @@ fi
 CANVAS_H=${CANVAS_H:-2436}
 [[ "$CANVAS_H" != 2499 ]] && CMDLINE+=" sweetfb_h=$CANVAS_H"
 [[ -n "${EXTRA_ARGS:-}" ]] && CMDLINE+=" $EXTRA_ARGS"
-python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael --canvas-height "$CANVAS_H"
+# BT_ADDR=AA:BB:CC:DD:EE:FF: the Bluetooth address for Settings > About and bluetoothd (btup prints the
+# controller's: BD_ADDR); the default is a locally administered placeholder.
+bt_addr_args=()
+[[ -n "${BT_ADDR:-}" ]] && bt_addr_args=(--bt-addr "$BT_ADDR")
+python3 "$ROOT/tools/mkadt.py" "$WORK/raphael.adt" --highmem --raphael --canvas-height "$CANVAS_H" "${bt_addr_args[@]}"
 
 overlay_args=(-o "$WORK/ios26-overlay-raphael.tar" --root-img "$ROOTIMG"
 	--userland-dir "$WORK/userland" --timezone "${TZ:-Europe/Moscow}" --register-missing-hot-daemons)
@@ -138,7 +142,14 @@ for f in "$ROOT"/work/fw/bt/crbtfw*.tlv "$ROOT"/work/fw/bt/crnv*.bin; do
 done
 [[ $n -gt 0 ]] && echo "Bluetooth: $n firmware file(s) staged at /var/local/fw/bt"
 # Daemons that only crash-loop on raphael (no Bluetooth driver yet, no SEP): STRIP_JOBS="" keeps them all.
-STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}
+# BT=1 (default when work/fw/bt has the firmware): btup at boot and bluetoothd on /dev/raphael-bt (kernel 0168+).
+if [[ -z "${BT:-}" ]]; then ls "$ROOT"/work/fw/bt/crbtfw*.tlv >/dev/null 2>&1 && BT=1 || BT=0; fi
+if [[ "$BT" == 1 ]]; then
+	overlay_args+=(--bluetooth "${BT_TRANSPORT:-H4:POSIX:/dev/raphael-bt,115200}")
+	STRIP_JOBS=${STRIP_JOBS-com.apple.fairplayd.H2 com.apple.seputil}
+else
+	STRIP_JOBS=${STRIP_JOBS-com.apple.bluetoothd com.apple.fairplayd.H2 com.apple.seputil}
+fi
 for j in $STRIP_JOBS; do overlay_args+=(--strip-job "$j"); done
 # MTL2_CLIENTS='* -chronod ...' (spaces or newlines): which processes get HotMetal2 (/var/local/mtl2-clients);
 # default as upstream: everyone but chronod, cameracaptured, WidgetRenderer_Default and PosterBoard.

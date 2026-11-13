@@ -3,7 +3,7 @@
  *
  * btup: bring the K20 Pro's WCN3990 Bluetooth controller up over /dev/raphael-bt (bsd/dev/raphael_bt.c).
  *
- *   btup [-d DEV] [-f FWDIR] [-b BAUD] [-n NN]   (defaults /dev/raphael-bt, /var/local/fw/bt, 3000000;
+ *   btup [-d DEV] [-f FWDIR] [-b BAUD] [-n NN] [-s SECONDS_TO_WAIT_FIRST]   (defaults /dev/raphael-bt, /var/local/fw/bt, 3000000;
  *                                               NN: firmware number in hex, default from the ROM version)
  *
  * The steps of Qualcomm's WCN399x bring-up (facts from Linux btqca.h / hci_qca.c, no code taken):
@@ -296,6 +296,9 @@ main(int argc, char **argv)
 			fwdir = argv[i + 1];
 		} else if (!strcmp(argv[i], "-b")) {
 			baud = (uint32_t)strtoul(argv[i + 1], NULL, 0);
+		} else if (!strcmp(argv[i], "-s")) {
+			/* at boot: wait for the Wi-Fi (wland powers the chip's supplies) */
+			sleep((unsigned)strtoul(argv[i + 1], NULL, 0));
 		}
 	}
 	fd = open(dev, O_RDWR);

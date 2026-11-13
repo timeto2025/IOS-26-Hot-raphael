@@ -14,6 +14,8 @@ import adt  # noqa: E402
 
 # Kernel-managed RAM: above every Qualcomm/OPPO XPU carve-out (RMX1931 carve-outs end at 0xbbb00000)
 PHYS_BASE = 0xc0000000
+# --bt-addr AA:BB:..: the Bluetooth address MobileGestalt (Settings > About) and bluetoothd read
+BT_ADDR = bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4d])
 MEM_SIZE = 0x3d000000
 # --highmem (phone only): above 4G. The flame live FDT memory node is
 # <0x80000000 0x3cc00000>, <0xc0000000 0x140000000>; every fixed
@@ -199,7 +201,7 @@ def build(seed=None, qemu=False, highmem=False, d22ap=False, canvas_height=2499,
         # registering extensions, and PosterBoard (no poster providers) asserts:
         # black wallpaper. Locally administered addresses, not the phone's.
         ('mac-address-wifi0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4c])),
-        ('mac-address-bluetooth0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4d])),
+        ('mac-address-bluetooth0', BT_ADDR),
         ('mac-address-ethernet0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4e])),
         # Panic region size (with /pram below): XNU's SavePanicInfo spins forever
         # without one, so panics printed no backtrace.
@@ -418,6 +420,9 @@ if __name__ == '__main__':
     # iPhone 11 Pro canvas is 1125 wide; keep the panel's aspect: 1125 * 2340 / 1080 = 2437.5
     canvas_h = 2437 if raphael else 2499
     for idx, arg in enumerate(sys.argv[1:], 1):
+        if arg == '--bt-addr' and idx + 1 < len(sys.argv):
+            BT_ADDR = bytes(int(x, 16) for x in sys.argv[idx + 1].split(':'))
+            assert len(BT_ADDR) == 6, 'need 6 bytes'
         if arg == '--canvas-height' and idx + 1 < len(sys.argv):
             canvas_h = int(sys.argv[idx + 1])
         elif arg.startswith('--canvas-height='):

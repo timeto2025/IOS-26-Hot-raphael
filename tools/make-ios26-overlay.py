@@ -475,6 +475,8 @@ def main():
                     help='optional path to HotMetal2.bundle to stage under /System/Library/Extensions')
     ap.add_argument('--userland-dir', help='optional extracted userland dir (Applications/, HAL/, bin/, lib/)')
     ap.add_argument('--dsc-stubs-dir', help='optional dir of de-PACd dyld_shared_cache_arm64e.* stub subcaches')
+    ap.add_argument('--bluetooth', metavar='TRANSPORT',
+                    help='run btup at boot and give bluetoothd BT_HCI_TRANSPORT (e.g. H4:POSIX:/dev/raphael-bt,115200)')
     ap.add_argument('--strip-job', action='append', metavar='LABEL',
                     help='remove the LaunchDaemon with this Label (repeatable)')
     ap.add_argument('--mtl2-clients',
@@ -666,6 +668,27 @@ def main():
                 'RunAtLoad': False, 'KeepAlive': False, 'UserName': 'root',
                 'StandardErrorPath': '/var/local/wland.log', 'StandardOutPath': '/var/local/wland.log',
             }
+
+    # --bluetooth TRANSPORT: the phone's own Bluetooth (raphael: btup loads the WCN3998, then bluetoothd talks
+    # H4 to /dev/raphael-bt). org.iosonpixel.btup runs once at load (it waits for the Wi-Fi's supplies itself);
+    # bluetoothd gets BT_HCI_TRANSPORT and is restarted by launchd until the controller answers.
+    if args.bluetooth:
+        bt_key = '/System/Library/LaunchDaemons/org.iosonpixel.btup.plist'
+        jobs[bt_key] = {
+            'Label': 'org.iosonpixel.btup',
+            'ProgramArguments': ['/var/local/bin/btup', '-b', '115200', '-s', '35'],
+            'RunAtLoad': True, 'KeepAlive': False, 'UserName': 'root', 'ProcessType': 'Interactive',
+            'StandardOutPath': '/var/local/btup.log', 'StandardErrorPath': '/var/local/btup.log',
+        }
+        hits = [k for k, j in jobs.items() if isinstance(j, dict) and j.get('Label') == 'com.apple.bluetoothd']
+        for k in hits:
+            env = dict(jobs[k].get('EnvironmentVariables') or {})
+            env['BT_HCI_TRANSPORT'] = args.bluetooth
+            env['BT_BAUDRATE'] = '115200'
+            jobs[k]['EnvironmentVariables'] = env
+            print(f'bluetoothd: BT_HCI_TRANSPORT={args.bluetooth} ({k})')
+        if not hits:
+            print('bluetoothd: warning: no com.apple.bluetoothd job (stripped?)')
 
     if args.wland_autostart:
         wl = jobs.get('/System/Library/LaunchDaemons/org.iosonpixel.wland.plist')
