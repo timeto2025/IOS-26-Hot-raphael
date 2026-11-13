@@ -1,0 +1,95 @@
+From 30fea7db776802f5801377372788835f66d374c3 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 03:44:00 +0300
+Subject: [PATCH] raphael BT: set the S3 RCG rate directly when the boot
+ firmware left it out of DFS
+
+---
+ bsd/dev/raphael_bt.c | 58 +++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index 12e5b2f..62fbe6d 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -155,6 +155,8 @@ bt_read_levels(void)
+ 	static const uint64_t src_hz[8] = { 19200000, 600000000, 0, 0, 0, 0, 300000000, 0 };
+ 	bt.levels = 0;
+ 	if (!(rd(bt.gcc, BT_RCG + 0x14u) & 1u)) {
++		printf("RAPH BT: S3 RCG not in DFS mode (cmd %#x cfg %#x): rates set directly\n", rd(bt.gcc, BT_RCG),
++		    rd(bt.gcc, BT_RCG + 4u));
+ 		return;
+ 	}
+ 	for (unsigned l = 0; l < 8; l++) {
+@@ -175,13 +177,67 @@ bt_read_levels(void)
+ 	}
+ }
+ 
++/*
++ * Without DFS (raphael's boot firmware leaves the S3 RCG in its plain mode): the RCG is set to one of the
++ * QUP serial-engine rates of Linux's gcc-sm8150 table (source 0 XO 19.2 MHz, 6 GPLL0 even 300 MHz; M/N in
++ * dual-edge mode), the one an exact multiple of 32 * baud with the smallest divider.
++ */
++static const struct { uint32_t hz; uint8_t src, hid; uint16_t m, n; } bt_rates[] = {
++	{   7372800, 6, 1,  384, 15625 }, {  14745600, 6, 1,  768, 15625 }, {  19200000, 0, 1, 0, 0 },
++	{  29491200, 6, 1, 1536, 15625 }, {  32000000, 6, 1,    8,    75 }, {  48000000, 6, 1, 4, 25 },
++	{  64000000, 6, 1,   16,    75 }, {  96000000, 6, 1,    8,    25 }, { 100000000, 6, 5, 0, 0 },
++};
++
++static int
++bt_set_rcg_baud_locked(uint32_t baud)
++{
++	uint64_t want = 32ull * baud;
++	int best = -1;
++	uint32_t best_div = 0;
++	for (unsigned i = 0; i < sizeof(bt_rates) / sizeof(bt_rates[0]); i++) {
++		if (bt_rates[i].hz % want == 0 && bt_rates[i].hz / want <= 0xfff &&
++		    (best < 0 || bt_rates[i].hz / want < best_div)) {
++			best = (int)i;
++			best_div = (uint32_t)(bt_rates[i].hz / want);
++		}
++	}
++	if (best < 0) {
++		printf("RAPH BT: no RCG rate divides %u baud exactly\n", baud);
++		return EINVAL;
++	}
++	const __typeof__(bt_rates[0]) *r = &bt_rates[best];
++	uint32_t cfg = rd(bt.gcc, BT_RCG + 4u) & ~((3u << 12) | (7u << 8) | 0x1fu);
++	cfg |= ((uint32_t)r->src << 8) | r->hid;
++	if (r->n) {
++		wr(bt.gcc, BT_RCG + 8u, r->m);
++		wr(bt.gcc, BT_RCG + 0xcu, (~(uint32_t)(r->n - r->m)) & 0xffffu);
++		wr(bt.gcc, BT_RCG + 0x10u, (~(uint32_t)r->n) & 0xffffu);
++		cfg |= 2u << 12;                        /* dual-edge M/N */
++	}
++	wr(bt.gcc, BT_RCG + 4u, cfg);
++	wr(bt.gcc, BT_RCG, rd(bt.gcc, BT_RCG) | 1u);   /* update */
++	if (!wait_clear(bt.gcc, BT_RCG, 1u)) {
++		printf("RAPH BT: RCG update timeout (cmd %#x cfg %#x)\n", rd(bt.gcc, BT_RCG), rd(bt.gcc, BT_RCG + 4u));
++		return EIO;
++	}
++	wr(bt.se, G_CLK_SEL, 0);
++	wr(bt.se, G_M_CLK_CFG, (best_div << 4) | 1u);
++	wr(bt.se, G_S_CLK_CFG, (best_div << 4) | 1u);
++	bt.baud = baud;
++	printf("RAPH BT: %u baud: RCG %u Hz (cfg %#x) / %u\n", baud, r->hz, rd(bt.gcc, BT_RCG + 4u), best_div);
++	return 0;
++}
++
+ /* 32 samples a bit: the level whose rate is an exact multiple of 32 * baud, smallest divider first. */
+ static int
+ bt_set_baud_locked(uint32_t baud)
+ {
+-	if (baud < 1200 || baud > 4000000 || bt.levels == 0) {
++	if (baud < 1200 || baud > 4000000) {
+ 		return EINVAL;
+ 	}
++	if (bt.levels == 0) {
++		return bt_set_rcg_baud_locked(baud);
++	}
+ 	uint64_t want = 32ull * baud;
+ 	int best = -1;
+ 	uint32_t best_div = 0;
+-- 
+2.43.0
+
