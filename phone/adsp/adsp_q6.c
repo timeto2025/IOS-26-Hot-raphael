@@ -1581,26 +1581,25 @@ adsp_q6_tick(void)
 	{
 		static uint64_t t0;
 		static uint32_t w0, pw0;
-		if (t0 == 0 || !hal_active) {
-			t0 = cur;
-			w0 = last_w;
-			pw0 = (uint32_t)g_status.periods_written;
-			feed_resyncs = feed_silence = feed_full = feed_waits = feed_max_avail = 0;
-			feed_min_avail = feed_min_queued = ~0u;
-		} else if (cur - t0 >= 5000ULL) {
+		bool flush_partial = !hal_active && t0 != 0 && last_w != w0 && cur - t0 >= 300ULL;
+		if (flush_partial || (hal_active && t0 != 0 && cur - t0 >= 2000ULL)) {
 			uint64_t dt = cur - t0;
 			char amp[128] = "";
 			if (g_status.amp_enabled && spk_amp_status(amp, sizeof(amp)) != 0) {
 				amp[0] = 0;
 			}
-			adsp_log("feed %llums: hal +%u (%u fps) dsp +%u periods (%u fps); full %u silence %u waits %u "
+			adsp_log("feed %llums%s: hal +%u (%u fps) dsp +%u periods (%u fps); full %u silence %u waits %u "
 			    "resync %u; backlog %u..%u queued>=%u state %d underruns %llu; hal gaps %u (last %d) cycle %u/%u; %s",
-			    (unsigned long long)dt, last_w - w0, (unsigned)((uint64_t)(last_w - w0) * 1000ULL / dt),
+			    (unsigned long long)dt, flush_partial ? " (end)" : "", last_w - w0,
+			    (unsigned)((uint64_t)(last_w - w0) * 1000ULL / dt),
 			    (uint32_t)g_status.periods_written - pw0,
 			    (unsigned)((uint64_t)((uint32_t)g_status.periods_written - pw0) * ADSP_PCM_PERIOD_FRAMES * 1000ULL / dt),
 			    feed_full, feed_silence, feed_waits, feed_resyncs, feed_min_avail, feed_max_avail,
 			    feed_min_queued, feed_state, (unsigned long long)g_status.underruns,
 			    g_shm->reserved[0], (int)g_shm->reserved[1], g_shm->reserved[2], g_shm->reserved[3], amp);
+			t0 = 0;
+		}
+		if (t0 == 0 || !hal_active) {
 			t0 = cur;
 			w0 = last_w;
 			pw0 = (uint32_t)g_status.periods_written;
