@@ -155,6 +155,8 @@ static uint8_t  period_ready[ADSP_DMA_PERIODS];
 #define ADSP_IDLE_QUEUED     4u                        /* silence kept queued: 80 ms */
 #define ADSP_PREFILL_FRAMES  (2u * ADSP_PCM_PERIOD_FRAMES) /* 40 ms backlog before PLAY */
 enum { FEED_IDLE, FEED_PREFILL, FEED_PLAY };
+static uint32_t feed_resyncs, feed_silence, feed_full, feed_waits, feed_min_avail = ~0u, feed_max_avail;
+static uint32_t feed_min_queued = ~0u;
 static uint64_t last_nonsilent_ms;
 static uint64_t last_voice_poll_ms;
 static uint64_t voice_retry_after_ms;
@@ -646,6 +648,7 @@ fill_period_pcm(int16_t *dst_stereo, uint32_t frames)
 	uint32_t mask = HOT_AUDIO_RING_FRAMES - 1u;
 
 	if (avail > HOT_AUDIO_RING_FRAMES) {
+		feed_resyncs++;
 		r = w;
 		__atomic_store_n(&g_shm->read_frames, r, __ATOMIC_RELEASE);
 		avail = 0;
@@ -1411,13 +1414,18 @@ adsp_q6_tick(void)
 				if (feed_state != FEED_PLAY) {
 					feed_state = avail >= ADSP_PREFILL_FRAMES ? FEED_PLAY : FEED_PREFILL;
 				}
+				if (avail < feed_min_avail) feed_min_avail = avail;
+				if (avail > feed_max_avail) feed_max_avail = avail;
+				if (queued < feed_min_queued) feed_min_queued = queued;
 				if (feed_state == FEED_PREFILL) {
 					if (queued >= ADSP_IDLE_QUEUED) {
 						break;
 					}
 					send_silence = true;
+					feed_silence++;
 				} else if (avail < ADSP_PCM_PERIOD_FRAMES) {
 					if (queued >= ADSP_MIN_QUEUED) {
+						feed_waits++;
 						break;
 					}
 					g_status.underruns++;
@@ -1432,6 +1440,9 @@ adsp_q6_tick(void)
 			(void)q6_send_period_write(p);
 			continue;
 		}
+		if (hal_active && tone_frames_left == 0) {
+			feed_full++;
+		}
 		bool signal = fill_period_pcm(pcm_buf, ADSP_PCM_PERIOD_FRAMES);
 		uint64_t pa = ADSP_DMA_PA + (uint64_t)p * ADSP_DMA_PERIOD_ALLOC;
 		(void)pm_wr(pa, pcm_buf, ADSP_PCM_PERIOD_BYTES);
@@ -1442,6 +1453,34 @@ adsp_q6_tick(void)
 			if (!g_status.amp_enabled) {
 				(void)spk_amp_set_enable(true);
 			}
+		}
+	}
+
+	/* 5 s feed telemetry while the HAL plays: rates tell host clock vs I2S clock apart */
+	{
+		static uint64_t t0;
+		static uint32_t w0, pw0;
+		if (t0 == 0 || !hal_active) {
+			t0 = cur;
+			w0 = last_w;
+			pw0 = (uint32_t)g_status.periods_written;
+			feed_resyncs = feed_silence = feed_full = feed_waits = feed_max_avail = 0;
+			feed_min_avail = feed_min_queued = ~0u;
+		} else if (cur - t0 >= 5000ULL) {
+			uint64_t dt = cur - t0;
+			adsp_log("feed %llums: hal +%u (%u fps) dsp +%u periods (%u fps); full %u silence %u waits %u "
+			    "resync %u; backlog %u..%u queued>=%u state %d underruns %llu; hal gaps %u (last %d) cycle %u/%u",
+			    (unsigned long long)dt, last_w - w0, (unsigned)((uint64_t)(last_w - w0) * 1000ULL / dt),
+			    (uint32_t)g_status.periods_written - pw0,
+			    (unsigned)((uint64_t)((uint32_t)g_status.periods_written - pw0) * ADSP_PCM_PERIOD_FRAMES * 1000ULL / dt),
+			    feed_full, feed_silence, feed_waits, feed_resyncs, feed_min_avail, feed_max_avail,
+			    feed_min_queued, feed_state, (unsigned long long)g_status.underruns,
+			    g_shm->reserved[0], (int)g_shm->reserved[1], g_shm->reserved[2], g_shm->reserved[3]);
+			t0 = cur;
+			w0 = last_w;
+			pw0 = (uint32_t)g_status.periods_written;
+			feed_resyncs = feed_silence = feed_full = feed_waits = feed_max_avail = 0;
+			feed_min_avail = feed_min_queued = ~0u;
 		}
 	}
 

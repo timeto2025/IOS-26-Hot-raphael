@@ -1204,7 +1204,22 @@ do_io_operation(__unused AudioServerPlugInDriverRef drv, __unused AudioObjectID 
 		actuator_write(buffer, frames);
 	} else if (operation == kAudioServerPlugInIOOperationWriteMix && stream == OBJECT_SPEAKER_OUTPUT) {
 		int fd = ensure_sink_fd();
+		struct hot_audio_shm *s = shm_ptr;
+		static Float64 next_st = -1.0;
+		static uint32_t gaps;
 
+		/* telemetry for adspd: IO cycles whose output time is not where the last one ended */
+		if (cycle != NULL && s != NULL) {
+			Float64 st = cycle->mOutputTime.mSampleTime;
+			if (next_st >= 0.0 && st != next_st) {
+				gaps++;
+				__atomic_store_n(&s->reserved[0], gaps, __ATOMIC_RELEASE);
+				__atomic_store_n(&s->reserved[1], (uint32_t)(int32_t)(st - next_st), __ATOMIC_RELEASE);
+			}
+			next_st = st + frames;
+			__atomic_store_n(&s->reserved[2], frames, __ATOMIC_RELEASE);
+			__atomic_store_n(&s->reserved[3], cycle->mNominalIOBufferFrameSize, __ATOMIC_RELEASE);
+		}
 		shm_write_speaker(buffer, frames);
 		if (fd < 0 || write(fd, buffer, (size_t)frames * HAKIOS_AUDIO_FRAME) < 0) {
 			refused += frames;
