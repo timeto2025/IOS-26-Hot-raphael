@@ -23,7 +23,7 @@
  * Env overrides (for testing without a rebuild):
  *   TFA_PROFILE=name   profile to apply (default "speaker")
  *   TFA_RESET_POL=0|1  level that asserts reset (default 1 = active high)
- *   TFA_REG_OFS=n      byte offset added to register-patch descriptors (default 2)
+ *   TFA_REG_OFS=n      byte offset added to register-patch descriptors (default 0)
  *   TFA_NO_CNT=1       skip the container (steps 4-5)
  */
 #include <errno.h>
@@ -292,7 +292,7 @@ cnt_string(uint32_t desc)
 static void
 cnt_apply_items(size_t items_off, unsigned count, bool is_profile, const char *what)
 {
-	int reg_ofs = env_int("TFA_REG_OFS", 2);
+	int reg_ofs = env_int("TFA_REG_OFS", 0);
 	unsigned nreg = 0, nbf = 0;
 
 	for (unsigned i = 0; i < count; i++) {

@@ -5,6 +5,14 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 17:20 MSK: FIRST SOUND from the speaker (adspd tone 2000, sweetaudio=0 image)
+- PAS at 0x8be00000+0x2200000 ok (14.2 MB loaded, auth_and_reset rc=0, SMP2P ready 100 ms), GLINK/QRTR/APR up,
+  SMMU SID 0x1b21 -> CB6, AFE 0x1006 SD0 stereo 48 kHz 24-bit started.
+- TFA9874 @0x34 rev 0x0c74 (also an unknown device acks at 0x0e). POR: TDMSLOTS=1, TDMSLLN=31 (32-bit slots).
+  After the container + MANSCONF/PWDN=0: CLKS=1 PLLS=1 AMPS=1 MANSTATE=9 in ~100 ms; AMPE on -> audible tone.
+- Bug found: register-patch descriptors point AT {addr,val,mask} (offset 0), not +2: the run wrote garbage to
+  reg 0x5a and bits of reg 0x00 and skipped the 0x0F/0xA1/0xA0 key writes. TFA_REG_OFS default is now 0.
+
 ### raphael, 2026-11-13 17:30 MSK: audio step 1 (adspd for raphael + own TFA9874 driver), untested
 - phone/adsp builds per board: -DADSP_BOARD_RAPHAEL (raphael-tools workflow) uses ADSP carve-out
   0x8be00000+0x2200000 (pil_adsp_region; RMX's 0x9b200000 is cont_splash here), QUAT_MI2S_RX on SD0, AFE/ADM
