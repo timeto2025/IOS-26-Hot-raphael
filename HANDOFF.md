@@ -5,6 +5,15 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-13 06:10 MSK: kernel 0172 (vendor commands answered locally)
+- With 0171 the HCI init passes (0x0c5b/0x0c7a answered, then Write_Local_Name, EIR, class...). Vendor commands
+  0xfdfd, 0xfff2, 0xfdda, 0xfce2 (sub 0x2a, 0x2c) get from the WCN3998 a vendor event `ff 05 00 00 10 0a` plus
+  Command Complete status 1; oslog: HDR_CONTROL / BTCLK_SENSORC_TIMESYNC / READ_PROP_LOCAL_FEATURES /
+  ENABLE_HOST_WAKE_REPORT "completed with status 701", "Invalid data size 0", then
+  BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS times out after 15 s -> restart reason 3602.
+- 0172: OGF 0x3f answered by the kernel (raphbtvsc=1 default: status 1; 2: status 0; 0: to the chip), the chip's
+  0xff events dropped. raphbtfake entries still win (status 0 + zero bytes) for single opcodes.
+
 ### raphael, 2026-11-13 05:55 MSK: kernel 0171 (bluetoothd's HCI init: Erroneous Data Reporting)
 - oslog (`/var/local/bin/oslog -t 30 -l bluetoothd`) with 0170: bluetoothd's mask print shows octet 18 = 0x83
   (no Read/Write Default Erroneous Data Reporting); after LE_SetPeriodicAdvListSize it fails

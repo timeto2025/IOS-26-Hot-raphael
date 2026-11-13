@@ -1,0 +1,61 @@
+From 5de344415e5cfb6aee08e218c84af6383619e381 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Fri, 13 Nov 2026 06:05:19 +0300
+Subject: [PATCH] raphael BT: vendor commands answered by the kernel (unknown
+ command) and the chip's 0xff events dropped by default
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/raphael_bt.c | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/bsd/dev/raphael_bt.c b/bsd/dev/raphael_bt.c
+index 15ca13f..a0ef734 100644
+--- a/bsd/dev/raphael_bt.c
++++ b/bsd/dev/raphael_bt.c
+@@ -787,6 +787,12 @@ bt_ctl_deliver(kern_ctl_ref ref, uint32_t unit)
+ 		}
+ 		return;
+ 	}
++	if (fr.pk[0] == 4 && fr.pk[1] == 0xff && bt.vsc) {
++		/* Qualcomm's own vendor events: bluetoothd reads 0xff as Broadcom/Apple events */
++		bt_ctl_log_rx(fr.pk, fr.n);
++		fr.dropped_dbg++;
++		return;
++	}
+ 	bt_ctl_log_rx(fr.pk, fr.n);
+ 	if (ctl_enqueuedata(ref, unit, fr.pk, fr.n, 0) != 0) {
+ 		bt.c_full++;
+@@ -929,11 +935,17 @@ bt_ctl_send(kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mbuf_t m,
+ 				continue;
+ 			}
+ 		}
+-		/* raphbtvsc=1: vendor commands (OGF 0x3f, Apple's and Broadcom's) answered here with success */
++		/*
++		 * Vendor commands (OGF 0x3f) are Apple's and Broadcom's: the WCN3998 answers them with an extra vendor
++		 * event 0xff and "unknown command", and bluetoothd then waits for Olympic answers that never come
++		 * (BD_VSC_OLYMPIC_SET_EXT_SCAN_LIMITS timed out). raphbtvsc=1 (default): answered here with status 0x01
++		 * (Unknown HCI Command, as the chip says, without its extra event); 2: status 0; 0: sent to the chip.
++		 */
+ 		if (bt.vsc && len >= 4 && d[0] == 1 && (d[2] >> 2) == 0x3fu && len == 4u + d[3]) {
+-			uint8_t ev[7] = { 4, 0x0e, 4, 1, d[1], d[2], 0 };
++			uint8_t ev[7] = { 4, 0x0e, 4, 1, d[1], d[2], bt.vsc == 2 ? 0 : 1 };
+ 			(void)ctl_enqueuedata(ref, unit, ev, sizeof(ev), 0);
+-			printf("RAPH BT: < complete %#06x status 0 (answered by the kernel)\n", d[1] | d[2] << 8);
++			printf("RAPH BT: < complete %#06x status %u (vendor command answered by the kernel)\n",
++			    d[1] | d[2] << 8, ev[6]);
+ 			continue;
+ 		}
+ 		if (bt_tx(d, (uint32_t)len) != 0) {
+@@ -1070,6 +1082,7 @@ raphael_bt_init(void)
+ 	if (kernel_thread_start(bt_poll_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	bt.vsc = 1;
+ 	(void)PE_parse_boot_argn("raphbtvsc", &bt.vsc, sizeof(bt.vsc));
+ 	bt_fake_parse();
+ 	bt_ctl_register();
+-- 
+2.43.0
+
