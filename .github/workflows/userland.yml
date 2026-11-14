@@ -123,7 +123,11 @@ jobs:
       - name: Build Mesa Turnip (libvulkan_freedreno.dylib) for iOS 16 arm64
         if: steps.cache-turnip.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 https://github.com/UniXNU/UniXNU.git reference-repos/UniXNU
+          # UniXNU pinned at cd1b975 (the cache key's cd1b9757): its later turnip-darwin-kmd.patch needs the kernel ABI v2
+          # (SetPriority/Note methods, OwnedCoherent/MemoryPressure params, 128 IBs) that SweetAccelerator does not have yet.
+          git init -q reference-repos/UniXNU
+          git -C reference-repos/UniXNU fetch --depth 1 https://github.com/UniXNU/UniXNU.git cd1b9757fd5d730bf85aabb37a4bce729ede9e58
+          git -C reference-repos/UniXNU checkout -q FETCH_HEAD
           mkdir -p work/turnip
           git init -q work/turnip/mesa
           git -C work/turnip/mesa fetch --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git 85fda3b36405bcaea8bffc64aa4f2651dc90770d || \
