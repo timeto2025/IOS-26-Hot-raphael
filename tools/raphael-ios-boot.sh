@@ -38,6 +38,13 @@ if [[ -n "${EXTRA_USERLAND:-}" ]]; then
 	tar -xzf "$EXTRA_USERLAND" -C "$WORK/userland"
 	echo "extra userland: $(tar -tzf "$EXTRA_USERLAND" | grep -c '^./bin/.') tools from $EXTRA_USERLAND"
 fi
+# METAL2_FROM=ios-userland.tar.gz (the userland workflow's artifact): take only its HotMetal2.bundle (a Metal driver
+# build to test) over the base userland's.
+if [[ -n "${METAL2_FROM:-}" ]]; then
+	rm -rf "$WORK/userland/Extensions/HotMetal2.bundle"
+	tar -xzf "$METAL2_FROM" -C "$WORK/userland" ./Extensions/HotMetal2.bundle
+	echo "HotMetal2.bundle from $METAL2_FROM ($(du -sh "$WORK/userland/Extensions/HotMetal2.bundle" | cut -f1))"
+fi
 
 CMDLINE="debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress"
 CMDLINE+=" rd=ufsroot0 ufsroot=darwin ufsrw=1 rootrw=1 ufslogsecs=5"
