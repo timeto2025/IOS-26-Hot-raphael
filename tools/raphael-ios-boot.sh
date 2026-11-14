@@ -218,6 +218,17 @@ if [[ -n "${MTL2_CLIENTS:-}" ]]; then
 	overlay_args+=(--mtl2-clients "$(tr ' ' '\n' <<<"$MTL2_CLIENTS")")
 	echo "HotMetal2 clients: $(tr '\n' ' ' <<<"$MTL2_CLIENTS")"
 fi
+# MTL2_ENV="K=V K2=V2": environment of every HotMetal2 process (/var/local/mtl2-env, read by HotMetal2 at load).
+# Default TU_DARWIN_BO_CACHE=0: Turnip's cache of freed buffers off, and with it the rounding of every buffer to a
+# size class (a 68 MB Metal memory block took 80 MB of the GPU pool). Seen on the phone, same boot: backboardd held
+# 952 MB after opening Maps with the cache (0.1 % of its lookups were hits) and 364 MB after nine apps without it.
+# MTL2_ENV="" stages no file (one already in darwin stays: empty it with ssh, `: > /var/local/mtl2-env`).
+MTL2_ENV=${MTL2_ENV-TU_DARWIN_BO_CACHE=0}
+if [[ -n "$MTL2_ENV" ]]; then
+	tr ' ' '\n' <<<"$MTL2_ENV" > "$WORK/mtl2-env"
+	overlay_args+=(--extra "$WORK/mtl2-env:private/var/local/mtl2-env:0644")
+	echo "HotMetal2 environment: $MTL2_ENV"
+fi
 python3 "$ROOT/tools/make-ios26-overlay.py" "${overlay_args[@]}"
 
 # RECOVERY=1: no overlay in the payload, small enough for the 64 MiB recovery partition. The kernel

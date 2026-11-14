@@ -1,0 +1,565 @@
+From 700ee331d9eb183838825c30c142f52a5c5ff932 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 13:40:23 +0300
+Subject: [PATCH] raphael: 0186 GPU SMMU faults ended without a reset (HUPCF),
+ fault report
+
+A GPU access to an unmapped address (Turnip on ABI 2: reads from
+iconservicesagent's command buffers 54-63 s after boot) blocked the GPU
+until the hang check reset it a second later, which lost every client's
+queued work and killed backboardd, SpringBoard and iconservicesagent.
+
+- the GPU's SMMU bank gets SCTLR.HUPCF, as Linux sets for Adreno
+- a latched fault is recorded and ended at fence waits, submits and
+  presents; the hang check still resets a GPU that stands still
+- report: the IB the CP was in and its submitter (last 256 IBs), whether
+  the address was unmapped lately (last 128 unmaps), what the owning
+  client has there, a freed buffer still waiting, the IB's words around
+  the CP and the addresses in it near the faulting one
+- boot-arg sweetgpuhupcf=0: as before
+---
+ bsd/dev/sweet_a6xx.c                  |  37 ++++-
+ bsd/dev/sweet_a6xx.h                  |   3 +
+ bsd/dev/sweet_gpu.c                   | 188 ++++++++++++++++++++++++++
+ iokit/Kernel/arm/SweetAccelerator.cpp | 188 ++++++++++++++++++++++++++
+ 4 files changed, 415 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
+index 4030023..a3a41ee 100644
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -250,7 +250,10 @@ static void smmu_bank(int smr, int cb, uint64_t ttbr0, uint32_t sid, uint32_t ma
+ 	wr32(c + CB_TCR, t0sz | (1u << 8) | (1u << 10) | (3u << 12) | (1u << 23));
+ 	wr32(c + CB_MAIR0, 0x0000ff44);
+ 	wr32(c + CB_FSR, 0xffffffff);
+-	wr32(c + CB_SCTLR, 1 | 2 | 4 | 0x20 | 0x40);		/* M TRE AFE CFRE CFIE */
++	/* HUPCF on the GPU's bank, as Linux does for Adreno (arm-smmu-qcom.c: "process subsequent transactions after a
++	 * fault to keep the GPU from hanging"): without it one translation fault failed every later access of the GPU
++	 * until FSR was cleared, which here happened only in the reset a second later. */
++	wr32(c + CB_SCTLR, 1 | 2 | 4 | 0x20 | 0x40 | (sid == GPU_SID && a6_hupcf ? 0x100u : 0u));	/* M TRE AFE CFRE CFIE [HUPCF] */
+ 	wr32(SMMU + 0x68, 0);					/* TLBIALLNSNH */
+ 	wr32(SMMU + 0x70, 0);					/* TLBGSYNC */
+ 	wait_bit(SMMU + 0x74, 1, 0, 10);
+@@ -299,6 +302,38 @@ uint32_t a6_fault_status(const struct a6_gpu *g, uint64_t *far, uint32_t *fsynr0
+ 	return rd32(c + CB_FSR) & A6_FSR_FAULT;
+ }
+ 
++int a6_hupcf = 1;
++
++/* The physical address behind a 4K GPU mapping, 0 when iova is not mapped (or lies in a block mapping). */
++uint64_t a6_iova_pa(struct a6_gpu *g, uint64_t iova)
++{
++	uint64_t e = 0, l1 = a6_pool_pa(g, A6_OFF_GT_L1), l2, l3;
++	if (iova >> 39)
++		return 0;
++	a6_read(l1 + 8 * ((iova >> 30) & 0x1ff), &e, 8);
++	l2 = (e & 3) == 3 ? e & 0xfffffff000ull : 0;
++	e = 0;
++	if (l2)
++		a6_read(l2 + 8 * ((iova >> 21) & 0x1ff), &e, 8);
++	l3 = (e & 3) == 3 ? e & 0xfffffff000ull : 0;
++	e = 0;
++	if (l3)
++		a6_read(l3 + 8 * ((iova >> 12) & 0x1ff), &e, 8);
++	return (e & 3) == 3 ? (e & 0xfffffff000ull) | (iova & 0xfff) : 0;
++}
++
++/* A latched fault ended without a line in the log (a6_clear_fault writes one): 1 if there was one. */
++int a6_end_fault(const struct a6_gpu *g)
++{
++	if (g->gpu_cb < 0)
++		return 0;
++	uint32_t fsr = rd32(SMMU_CB(g->gpu_cb) + CB_FSR);
++	if (!(fsr & A6_FSR_FAULT))
++		return 0;
++	wr32(SMMU_CB(g->gpu_cb) + CB_FSR, fsr);
++	return 1;
++}
++
+ /*
+  * A translation fault blocks the GPU's later writes (the fence never lands)
+  * until the context bank's FSR is cleared; clearing it is enough to go on.
+diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
+index 47ab8bb..8b060bb 100644
+--- a/bsd/dev/sweet_a6xx.h
++++ b/bsd/dev/sweet_a6xx.h
+@@ -125,6 +125,9 @@ void a6_unmap_high(struct a6_gpu *g);	/* drop all mappings above 1 GB, reset the
+ void a6_tlb_flush(const struct a6_gpu *g);
+ int a6_clear_fault(const struct a6_gpu *g);	/* 1 if an SMMU fault was cleared */
+ uint32_t a6_fault_status(const struct a6_gpu *g, uint64_t *far, uint32_t *fsynr0);
++int a6_end_fault(const struct a6_gpu *g);	/* 1 if a latched SMMU fault was ended (FSR written back), nothing logged */
++uint64_t a6_iova_pa(struct a6_gpu *g, uint64_t iova);	/* physical address of a 4K GPU mapping, 0: not mapped */
++extern int a6_hupcf;			/* 1: the GPU's SMMU bank gets SCTLR.HUPCF (set before the bring-up) */
+ 
+ /*
+  * Scaled, filtered 2D blit (the one Mesa's turnip emits for vkCmdBlitImage
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 38f231a..4c32982 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -268,6 +268,10 @@ gpu_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+ 	uint64_t t0 = mach_absolute_time(), ns;
+ 	gpu_bus_vote();
++	/* sweetgpuhupcf=0: the SMMU bank and the fault handling as before 0186 (a fault ends in the reset a second later) */
++	uint32_t hupcf = 1;
++	(void)PE_parse_boot_argn("sweetgpuhupcf", &hupcf, sizeof(hupcf));
++	a6_hupcf = hupcf != 0;
+ 	lck_mtx_lock(&sweet_gpu_lock);
+ 	int rc = a6_power_up(&gpu);
+ 	if (!rc) {
+@@ -510,12 +514,160 @@ gpu_kill_lost_later(uint32_t lo, uint32_t hi)
+ 	}
+ }
+ 
++/*
++ * ---- SMMU faults of the GPU ----
++ *
++ * A GPU access to an address with no mapping (raphael with Turnip on ABI 2: reads at 0x120a338180 and at 0 from
++ * iconservicesagent's command buffers, 54-63 s after boot) latched FSR; without SCTLR.HUPCF every later access failed
++ * too, nobody looked at FSR until the fences had stood still for a second, and the reset then threw away the queued
++ * work of every client, which were killed (backboardd and SpringBoard with it). Linux's msm driver and UniXNU's
++ * NativeAdreno end the fault and let the GPU go on: the faulting access alone is lost. Here the same: the bank has
++ * HUPCF (sweet_a6xx.c), and wherever the kernel already looks at the GPU (a fence wait, a submit, a present) a latched
++ * fault is recorded and ended. A GPU that really stands still is still reset by the hang check.
++ *
++ * What is recorded, for finding the access: whose IB the CP was in (the last IB_HIST submitted IBs), where in it,
++ * whether the address was unmapped lately (the last UNMAP_HIST unmaps), and from a thread call, without this file's
++ * lock, what the owning client has at the address and the IB's words around the CP (SweetAccelerator.cpp).
++ */
++#define IB_HIST         256
++#define UNMAP_HIST      128
++static struct { uint64_t iova; uint32_t dwords, fence; int pid; } ib_hist[IB_HIST];
++static uint32_t ib_hist_n;
++static struct { uint64_t iova, len, abs; } unmap_hist[UNMAP_HIST];
++static uint32_t unmap_hist_n;
++static uint64_t fault_count, fault_log_abs;
++static uint32_t fault_logged;
++static thread_call_t fault_tc;
++static struct gpu_fault_rec {
++	uint32_t seq, ib1_dw, ib1_pos, ib2_rem;
++	uint64_t far, ib1, ib2;
++} fault_rec;
++static bool fault_rec_pending;
++
++void sweet_accel_fault_describe(uint32_t seq, uint64_t far, uint64_t ib1, uint32_t ib1_dw, uint32_t ib1_pos, uint64_t ib2,
++    uint32_t ib2_rem);
++
++static void
++gpu_unmap_note_locked(uint64_t iova, uint64_t len)
++{
++	unmap_hist[unmap_hist_n % UNMAP_HIST].iova = iova;
++	unmap_hist[unmap_hist_n % UNMAP_HIST].len = len;
++	unmap_hist[unmap_hist_n % UNMAP_HIST].abs = mach_absolute_time();
++	unmap_hist_n++;
++}
++
++static void
++gpu_fault_describe(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	lck_mtx_lock(&sweet_gpu_lock);
++	struct gpu_fault_rec r = fault_rec;
++	lck_mtx_unlock(&sweet_gpu_lock);
++	sweet_accel_fault_describe(r.seq, r.far, r.ib1, r.ib1_dw, r.ib1_pos, r.ib2, r.ib2_rem);
++	lck_mtx_lock(&sweet_gpu_lock);
++	fault_rec_pending = false;
++	lck_mtx_unlock(&sweet_gpu_lock);
++}
++
++/* One line for the fault now latched (or the hang, fsr 0), and the rest from the thread call. */
++static void
++gpu_fault_log_locked(const char *why, uint32_t fsr, uint64_t far, uint32_t syn, bool reset)
++{
++	uint64_t now = mach_absolute_time(), ns = 0;
++	uint64_t ib1 = ((uint64_t)a6_rd(A6_GREG(0x929)) << 32) | a6_rd(A6_GREG(0x928));
++	uint64_t ib2 = ((uint64_t)a6_rd(A6_GREG(0x92c)) << 32) | a6_rd(A6_GREG(0x92b));
++	uint32_t ib1_rem = a6_rd(A6_GREG(0x92a)), ib2_rem = a6_rd(A6_GREG(0x92d));
++	/* the submitted IB the CP is in: the newest one that starts at, or holds, IB1's address */
++	int hit = -1;
++	for (uint32_t i = 0; i < IB_HIST && i < ib_hist_n && ib1 != 0; i++) {
++		uint32_t k = (ib_hist_n - 1 - i) % IB_HIST;
++		if (ib1 >= ib_hist[k].iova && ib1 < ib_hist[k].iova + 4ULL * ib_hist[k].dwords) {
++			hit = (int)k;
++			break;
++		}
++	}
++	uint64_t ib1_start = hit >= 0 ? ib_hist[hit].iova : ib1;
++	uint32_t ib1_dw = hit >= 0 ? ib_hist[hit].dwords : 0, ib1_pos = 0;
++	if (hit >= 0) {
++		/* IB1's register holds the IB's start with the words left (seen so), or else the CP's own position */
++		ib1_pos = ib1 == ib1_start ? (ib1_dw > ib1_rem ? ib1_dw - ib1_rem : 0) : (uint32_t)((ib1 - ib1_start) / 4);
++	}
++	char name[32] = "?";
++	if (hit >= 0 && ib_hist[hit].pid > 0) {
++		proc_name(ib_hist[hit].pid, name, sizeof(name));
++	}
++	/* was the address unmapped lately? */
++	uint64_t un_iova = 0, un_len = 0, un_ms = 0;
++	for (uint32_t i = 0; i < UNMAP_HIST && i < unmap_hist_n && fsr != 0; i++) {
++		uint32_t k = (unmap_hist_n - 1 - i) % UNMAP_HIST;
++		if (far >= unmap_hist[k].iova && far < unmap_hist[k].iova + unmap_hist[k].len) {
++			un_iova = unmap_hist[k].iova;
++			un_len = unmap_hist[k].len;
++			absolutetime_to_nanoseconds(now - unmap_hist[k].abs, &ns);
++			un_ms = ns / 1000000ULL;
++			break;
++		}
++	}
++	uint32_t seq = (uint32_t)fault_count;
++	a6_log("fault %u (%s): smmu fsr %x far %llx fsynr0 %x (%s, level %u), fence %u done %u, %s\n", seq, why, fsr, far, syn,
++	    fsr == 0 ? "no fault latched" : (syn & 0x10) ? "write" : "read", syn & 3, gpu.fence, a6_fence_read(&gpu),
++	    reset ? "reset" : "ended, the GPU goes on");
++	a6_log("fault %u: ib1 %llx rem %x = word %u of %u at %llx, fence %u, from %s[%d]; ib2 %llx rem %x; far page %s\n", seq,
++	    ib1, ib1_rem, ib1_pos, ib1_dw, ib1_start, hit >= 0 ? ib_hist[hit].fence : 0, name, hit >= 0 ? ib_hist[hit].pid : 0,
++	    ib2, ib2_rem, fsr == 0 ? "-" : a6_iova_pa(&gpu, far) != 0 ? "is mapped now" : "is not mapped");
++	if (un_len != 0) {
++		a6_log("fault %u: far lies in %llx + %llx, unmapped %llu ms before\n", seq, un_iova, un_len, un_ms);
++	}
++	if (!fault_rec_pending) {
++		fault_rec.seq = seq;
++		fault_rec.far = fsr != 0 ? far : 0;
++		fault_rec.ib1 = ib1_start;
++		fault_rec.ib1_dw = ib1_dw;
++		fault_rec.ib1_pos = ib1_pos;
++		fault_rec.ib2 = ib2;
++		fault_rec.ib2_rem = ib2_rem;
++		if (fault_tc == NULL) {
++			fault_tc = thread_call_allocate_with_priority(gpu_fault_describe, NULL, THREAD_CALL_PRIORITY_KERNEL);
++		}
++		if (fault_tc != NULL) {
++			fault_rec_pending = true;
++			thread_call_enter(fault_tc);
++		}
++	}
++}
++
++/* With sweet_gpu_lock: a latched SMMU fault is recorded and ended; true if there was one. */
++static bool
++gpu_fault_service_locked(const char *why)
++{
++	if (!a6_hupcf || !gpu_ready) {
++		return false;
++	}
++	uint64_t far;
++	uint32_t syn, fsr = a6_fault_status(&gpu, &far, &syn);
++	if (!fsr) {
++		return false;
++	}
++	uint64_t now = mach_absolute_time(), ns;
++	fault_count++;
++	absolutetime_to_nanoseconds(now - fault_log_abs, &ns);
++	/* the first eight in full, then one every 5 s: a job that runs over unmapped memory faults at every page */
++	if (fault_logged < 8 || ns > 5000000000ULL) {
++		fault_logged++;
++		fault_log_abs = now;
++		gpu_fault_log_locked(why, fsr, far, syn, false);
++	}
++	(void)a6_end_fault(&gpu);
++	return true;
++}
++
+ /* Soft reset + CP re-init; everything queued is lost, its fences complete at once (waiters return). */
+ static void
+ gpu_recover_locked(const char *why)
+ {
+ 	uint64_t far;
+ 	uint32_t syn, fsr = a6_fault_status(&gpu, &far, &syn), done = a6_fence_read(&gpu);
++	fault_count++;
++	gpu_fault_log_locked(why, fsr, far, syn, true);
+ 	a6_log("%s: GPU hang or fault (fence %u, done %u, smmu fsr %x far %llx fsynr0 %x): reset\n",
+ 	    why, gpu.fence, done, fsr, far, syn);
+ 	/* where the CP was: ring read pointer, IB1/IB2 (base + dwords left), SQE status */
+@@ -804,6 +956,7 @@ static int
+ present_wait_locked(uint32_t k, const char *why)
+ {
+ 	while (present_fence[k] && !a6_fence_done(&gpu, present_fence[k])) {
++		(void)gpu_fault_service_locked(why);
+ 		if (gpu_hung_locked(500)) {
+ 			gpu_recover_locked(why);
+ 			return -1;
+@@ -1603,10 +1756,35 @@ sweet_gpu_unmap_at(uint64_t iova, uint64_t len)
+ 	if (gpu_ready) {
+ 		a6_unmap(&gpu, iova, len);
+ 		a6_tlb_flush(&gpu);
++		gpu_unmap_note_locked(iova, len);
+ 	}
+ 	lck_mtx_unlock(&sweet_gpu_lock);
+ }
+ 
++/* For the fault report (SweetAccelerator.cpp): the physical address behind a GPU address, 0 when it is not mapped */
++uint64_t sweet_gpu_iova_pa(uint64_t iova);
++uint64_t
++sweet_gpu_iova_pa(uint64_t iova)
++{
++	lck_mtx_lock(&sweet_gpu_lock);
++	uint64_t pa = gpu_ready ? a6_iova_pa(&gpu, iova) : 0;
++	lck_mtx_unlock(&sweet_gpu_lock);
++	return pa;
++}
++
++/* ...and whether that memory is the GPU pool's (which has no kernel mapping of its own) */
++bool sweet_gpu_pool_has(uint64_t pa, uint64_t len);
++bool
++sweet_gpu_pool_has(uint64_t pa, uint64_t len)
++{
++	for (unsigned i = 0; i < sizeof(gpool_ranges) / sizeof(gpool_ranges[0]); i++) {
++		if (gpool_ranges[i].size != 0 && pa >= gpool_ranges[i].pa && pa + len <= gpool_ranges[i].pa + gpool_ranges[i].size) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ void sweet_gpu_unmap_at_batch(const uint64_t *iovas, const uint64_t *lens, unsigned count);
+ void
+ sweet_gpu_unmap_at_batch(const uint64_t *iovas, const uint64_t *lens, unsigned count)
+@@ -1620,6 +1798,7 @@ sweet_gpu_unmap_at_batch(const uint64_t *iovas, const uint64_t *lens, unsigned c
+ 		for (unsigned i = 0; i < count; i++) {
+ 			if (iovas[i] >= WIN_BASE && lens[i] != 0) {
+ 				a6_unmap(&gpu, iovas[i], lens[i]);
++				gpu_unmap_note_locked(iovas[i], lens[i]);
+ 				any = true;
+ 			}
+ 		}
+@@ -1639,9 +1818,17 @@ sweet_gpu_submit_v2(const uint64_t *iova, const uint32_t *dwords, unsigned n, bo
+ 		return 0;
+ 	}
+ 	lck_mtx_lock(&sweet_gpu_lock);
++	(void)gpu_fault_service_locked("v2 submit");
+ 	gpu_note_submit_locked();
+ 	uint32_t fence = a6_submit_ibs_async(&gpu, iova, dwords, n, 0);
+ 	gpu_owner_locked(fence, proc_selfpid());
++	for (unsigned i = 0; fence != 0 && i < n; i++) {
++		ib_hist[ib_hist_n % IB_HIST].iova = iova[i];
++		ib_hist[ib_hist_n % IB_HIST].dwords = dwords[i];
++		ib_hist[ib_hist_n % IB_HIST].fence = fence;
++		ib_hist[ib_hist_n % IB_HIST].pid = proc_selfpid();
++		ib_hist_n++;
++	}
+ 	lck_mtx_unlock(&sweet_gpu_lock);
+ 	*busy = fence == 0 && n > 0 && n <= A6_SUBMIT_MAX;
+ 	return fence;
+@@ -1682,6 +1869,7 @@ sweet_gpu_wait_fence_ns(uint32_t fence, uint64_t timeout_ns)
+ 		if (now - last_check > check_abs) {
+ 			last_check = now;
+ 			lck_mtx_lock(&sweet_gpu_lock);
++			(void)gpu_fault_service_locked("v2 fence wait");
+ 			if (!a6_fence_done(&gpu, fence) && gpu_hung_locked(1000)) {
+ 				gpu_recover_locked("v2 fence wait");
+ 			}
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+index 5d4afd8..b5836e6 100644
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -68,6 +68,10 @@ void sweet_gpu_unmap_at_batch(const uint64_t *iovas, const uint64_t *lens, unsig
+ uint32_t sweet_gpu_submit_v2(const uint64_t *iova, const uint32_t *dwords, unsigned n, bool *busy);
+ uint32_t sweet_gpu_last_fence(void);
+ bool sweet_gpu_fence_done(uint32_t fence);
++uint64_t sweet_gpu_iova_pa(uint64_t iova);
++bool sweet_gpu_pool_has(uint64_t pa, uint64_t len);
++void sweet_accel_fault_describe(uint32_t seq, uint64_t far, uint64_t ib1, uint32_t ib1_dw, uint32_t ib1_pos, uint64_t ib2,
++    uint32_t ib2_rem);
+ int sweet_gpu_wait_fence_ns(uint32_t fence, uint64_t timeout_ns);
+ bool sweet_gpu_lost(uint64_t *epoch, uint32_t last_fence);
+ uint64_t sweet_gpu_recoveries(void);
+@@ -197,6 +201,7 @@ private:
+ 
+ public:
+ 	void fillClientDiag(struct sweet_diag_gpu_client *out);
++	bool describeIova(uint64_t iova, const char *what, uint32_t seq);
+ 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+ 	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+@@ -1583,6 +1588,189 @@ SweetAcceleratorUserClient::fillClientDiag(struct sweet_diag_gpu_client *out)
+ 	out->faults = fFaults;
+ }
+ 
++/*
++ * ---- the report of a GPU fault (bsd/dev/sweet_gpu.c calls sweet_accel_fault_describe from a thread call) ----
++ */
++
++/* With gAccelClientsLock: if the address is in this client's window, one line on what the client has there. */
++bool
++SweetAcceleratorUserClient::describeIova(uint64_t iova, const char *what, uint32_t seq)
++{
++	if (!fV2 || fWinSize == 0 || fBO == NULL || iova < fWinBase || iova >= fWinBase + fWinSize) {
++		return false;
++	}
++	uint64_t hit = 0, hit_iova = 0, hit_bytes = 0, below = 0, below_bytes = 0, above = 0, mapped_bytes = 0;
++	uint32_t mapped = 0;
++	bool hit_imported = false;
++	IOLockLock(fLock);
++	for (uint32_t i = 0; i < fBOCap; i++) {
++		const SweetV2BO *b = &fBO[i];
++		if (b->md == NULL || b->iova == 0) {
++			continue;
++		}
++		mapped++;
++		mapped_bytes += b->bytes;
++		if (iova >= b->iova && iova < b->iova + b->bytes) {
++			hit = i + 1;
++			hit_iova = b->iova;
++			hit_bytes = b->bytes;
++			hit_imported = b->imported;
++		} else if (b->iova < iova && b->iova >= below) {
++			below = b->iova;
++			below_bytes = b->bytes;
++		} else if (b->iova > iova && (above == 0 || b->iova < above)) {
++			above = b->iova;
++		}
++	}
++	IOLockUnlock(fLock);
++	if (hit != 0) {
++		IOLog("SWEET GPU: fault %u: %s %llx: %s[%d]'s buffer %llu (%llx + %llx, %s)\n", seq, what, iova, fName, fPid, hit,
++		    hit_iova, hit_bytes, hit_imported ? "imported pages" : "pool");
++	} else {
++		IOLog("SWEET GPU: fault %u: %s %llx: in %s[%d]'s window, in none of its %u mapped buffers (%llu MB); the one "
++		    "below is %llx + %llx, the one above starts at %llx\n", seq, what, iova, fName, fPid, mapped, mapped_bytes >> 20,
++		    below, below_bytes, above);
++	}
++	return true;
++}
++
++/* Words of GPU memory (pool memory only), through a write-combined kernel view as BoAlloc's: how many were read. */
++static uint32_t
++sweet_fault_read(uint64_t iova, uint32_t *out, uint32_t ndw)
++{
++	uint32_t got = 0;
++	iova &= ~3ULL;
++	while (got < ndw) {
++		uint64_t va = iova + 4ULL * got, pa = sweet_gpu_iova_pa(va & ~4095ULL);
++		uint32_t n = (uint32_t)((4096 - (va & 4095)) / 4);
++		if (n > ndw - got) {
++			n = ndw - got;
++		}
++		if (pa == 0 || !sweet_gpu_pool_has(pa & ~4095ULL, 4096)) {
++			break;
++		}
++		IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pa & ~4095ULL, 4096, kIODirectionInOut);
++		IOMemoryMap *km = md != NULL ? md->map(kIOMapWriteCombineCache) : NULL;
++		if (km == NULL) {
++			OSSafeReleaseNULL(md);
++			break;
++		}
++		memcpy(out + got, (const void *)(km->getVirtualAddress() + (va & 4095)), 4ULL * n);
++		km->release();
++		md->release();
++		got += n;
++	}
++	return got;
++}
++
++/* count words from word `first` of an IB, eight a line; the line with word `mark` is pointed at */
++static void
++sweet_fault_dump(uint32_t seq, const char *what, const uint32_t *dw, uint32_t first, uint32_t count, uint32_t mark)
++{
++	for (uint32_t i = 0; i < count; i += 8) {
++		char line[8 * 9 + 1];
++		size_t l = 0;
++		line[0] = 0;
++		for (uint32_t k = i; k < count && k < i + 8; k++) {
++			l += (size_t)snprintf(line + l, sizeof(line) - l, " %08x", dw[k]);
++		}
++		IOLog("SWEET GPU: fault %u: %s word %5u:%s%s\n", seq, what, first + i, line,
++		    mark >= first + i && mark < first + i + 8 ? "  <- CP" : "");
++	}
++}
++
++/* the 64-bit values in an IB that are GPU addresses up to 64 MB below the faulting one (at most 12) */
++static void
++sweet_fault_search(uint32_t seq, const char *what, const uint32_t *dw, uint32_t count, uint64_t far)
++{
++	uint32_t found = 0;
++	for (uint32_t i = 0; far != 0 && i + 1 < count && found < 12; i++) {
++		uint64_t v = dw[i] | ((uint64_t)dw[i + 1] << 32);
++		if (v != 0 && v <= far && far - v < (64ULL << 20) && (v >> 32) == (far >> 32)) {
++			IOLog("SWEET GPU: fault %u: %s word %u names %llx (far - %llx); before it %08x %08x\n", seq, what, i, v, far - v,
++			    i >= 2 ? dw[i - 2] : 0, i >= 1 ? dw[i - 1] : 0);
++			found++;
++		}
++	}
++}
++
++/* An IB's words around the CP and its addresses near far. dw 0: the size is not known, base is where the CP reads. */
++static uint32_t
++sweet_fault_ib(uint32_t seq, const char *what, uint64_t base, uint32_t dw, uint32_t pos, uint64_t far, uint32_t *buf, uint32_t cap)
++{
++	uint32_t got;
++	if (base == 0) {
++		return 0;
++	}
++	if (dw == 0) {
++		got = sweet_fault_read(base - 4 * 48, buf, 64);
++		if (got == 64) {
++			IOLog("SWEET GPU: fault %u: %s %llx: size not known, 48 words before it and 16 after\n", seq, what, base);
++			sweet_fault_dump(seq, what, buf, 0, 64, 48);
++			return 64;
++		}
++		got = sweet_fault_read(base, buf, 64);
++		IOLog("SWEET GPU: fault %u: %s %llx: size not known, %u words read from it\n", seq, what, base, got);
++		sweet_fault_dump(seq, what, buf, 0, got, 0);
++		return got;
++	}
++	got = sweet_fault_read(base, buf, dw < cap ? dw : cap);
++	IOLog("SWEET GPU: fault %u: %s %llx: %u words, the CP at word %u, %u read\n", seq, what, base, dw, pos, got);
++	if (got != 0) {
++		const uint32_t at = pos < got ? pos : got - 1, first = at > 56 ? at - 56 : 0, end = at + 8 < got ? at + 8 : got;
++		sweet_fault_dump(seq, what, buf + first, first, end - first, at);
++		sweet_fault_search(seq, what, buf, got, far);
++	}
++	return got;
++}
++
++extern "C" void
++sweet_accel_fault_describe(uint32_t seq, uint64_t far, uint64_t ib1, uint32_t ib1_dw, uint32_t ib1_pos, uint64_t ib2,
++    uint32_t ib2_rem)
++{
++	const uint32_t cap = 16384;
++	const uint64_t addr[2] = { far, ib1 };
++	const char *const what[2] = { "far", "ib1" };
++	if (gAccelClientsLock != NULL) {
++		IOLockLock(gAccelClientsLock);
++		for (unsigned a = 0; a < 2; a++) {
++			bool found = false;
++			for (unsigned i = 0; i < SWEET_DIAG_MAX_CLIENTS && !found; i++) {
++				found = gAccelClients[i] != NULL && gAccelClients[i]->describeIova(addr[a], what[a], seq);
++			}
++			if (!found) {
++				IOLog("SWEET GPU: fault %u: %s %llx: in no client's window\n", seq, what[a], addr[a]);
++			}
++		}
++		IOLockUnlock(gAccelClientsLock);
++	}
++	/* a buffer freed with BoFree, kept mapped until the fence of that moment */
++	if (sweet_retire_lock != NULL && far != 0) {
++		IOLockLock(sweet_retire_lock);
++		for (uint32_t i = 0; i < sweet_retire_count; i++) {
++			const struct sweet_v2_retired *e = &sweet_retire_ring[(sweet_retire_head + i) % SWEET_V2_RETIRE_CAP];
++			if (e->iova != 0 && far >= e->iova && far < e->iova + e->bytes) {
++				IOLog("SWEET GPU: fault %u: far is in a freed buffer %llx + %llx still waiting for fence %u (%s)\n", seq,
++				    e->iova, e->bytes, e->fence, sweet_gpu_fence_done(e->fence) ? "done" : "not done");
++			}
++		}
++		IOLockUnlock(sweet_retire_lock);
++	}
++	uint32_t *buf = IONew(uint32_t, cap);
++	if (buf == NULL) {
++		return;
++	}
++	uint32_t got = sweet_fault_ib(seq, "ib1", ib1, ib1_dw, ib1_pos, far, buf, cap), ib2_dw = 0;
++	/* IB2's size: the CP_INDIRECT_BUFFER in IB1 that names it (address low, high, words) */
++	for (uint32_t i = 0; ib2 != 0 && i + 2 < got; i++) {
++		if (buf[i] == (uint32_t)ib2 && buf[i + 1] == (uint32_t)(ib2 >> 32)) {
++			ib2_dw = buf[i + 2] & 0xfffff;
++		}
++	}
++	(void)sweet_fault_ib(seq, "ib2", ib2, ib2_dw, ib2_dw > ib2_rem ? ib2_dw - ib2_rem : 0, far, buf, cap);
++	IODelete(buf, uint32_t, cap);
++}
++
+ /*
+  * After a GPU reset: the pids of the clients whose last submitted fence was in (lo, hi], the work
+  * the reset threw away. Their GPU state is gone (HotMetal does not rebuild it), so the kernel
+-- 
+2.56.1
+

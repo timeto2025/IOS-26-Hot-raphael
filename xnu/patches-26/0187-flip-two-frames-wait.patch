@@ -1,0 +1,117 @@
+From c52459ca199a606454742de1b156c049f371f539 Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 13:51:12 +0300
+Subject: [PATCH] raphael: 0187 two frames can wait for their flip
+
+A present that came while the frame before it still waited for its blit
+took the third frame and replaced it as the one waiting: the earlier
+frame was never shown and not counted. With the GPU a frame behind
+(scrolling Settings: GPU 94-98 % busy, 53-56 presents a second) 20 to 45
+of 206 to 279 presents in 5 s reached the panel.
+
+Two frames wait in order now; when both are finished the newer one is
+shown; a third present draws over the newer one, as before.
+---
+ bsd/dev/sweet_gpu.c | 45 +++++++++++++++++++++++++++++++++------------
+ 1 file changed, 33 insertions(+), 12 deletions(-)
+
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 4c32982..cc5f0c2 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -722,8 +722,16 @@ static int flip_state = -1;             /* -1 not set up yet, 0 off, 1 on */
+ static uint32_t flip_off[2];            /* VIG0/VIG1 source address - frame base, as ABL set them */
+ static int flip_pipes = 2;              /* 2: VIG0 + VIG1 split, 1: VIG0 alone (VIG1 address 0) */
+ static uint32_t flip_flush = 0x3;       /* CTL0 flush bits of the pipes in use */
+-static int flip_front, flip_pending = -1, flip_prev = -1;
+-static uint32_t flip_pending_fence;
++static int flip_front, flip_prev = -1;
++/*
++ * The frames drawn (or still being drawn) that are not on screen yet, the older first. There was one: a present that
++ * came while the frame before it still waited for its blit took the third frame and became "the" waiting one, and the
++ * frame before it was never shown. With the GPU a frame behind (raphael, scrolling Settings: GPU 94-98 % busy, 53-56
++ * presents a second) that was nearly every frame: 20 to 45 of 206 to 279 presents in 5 s reached the panel. Two can
++ * wait with three frames (one on screen); a third present draws over the newer one.
++ */
++static int flip_pend[2] = { -1, -1 };
++static uint32_t flip_pend_fence[2];
+ static uint64_t flip_count, flip_skipped;
+ static vm_offset_t flip_cpu[3];
+ /*
+@@ -796,25 +804,36 @@ flip_target_locked(void)
+ {
+ 	bool latched = (a6_rd(CTL0_FLUSH) & flip_flush) == 0;
+ 	for (int f = 0; f < 3; f++) {
+-		if (f != flip_front && f != flip_pending && (latched || f != flip_prev)) {
++		if (f != flip_front && f != flip_pend[0] && f != flip_pend[1] && (latched || f != flip_prev)) {
+ 			return f;
+ 		}
+ 	}
+-	/* all three busy: draw over the one still waiting (the GPU runs in order; the flip waits for the new fence) */
++	/* all three busy: draw over the newest one still waiting (the GPU runs in order; the flip waits for the new fence) */
+ 	flip_skipped++;
+-	return flip_pending >= 0 ? flip_pending : (flip_front + 1) % 3;
++	return flip_pend[1] >= 0 ? flip_pend[1] : flip_pend[0] >= 0 ? flip_pend[0] : (flip_front + 1) % 3;
+ }
+ 
+ /* A finished frame goes on screen once the previous flip latched. From the present and every vsync tick. */
+ static void
+ flip_poll_locked(void)
+ {
+-	if (flip_state != 1 || flip_pending < 0 || !a6_fence_done(&gpu, flip_pending_fence) ||
++	if (flip_state != 1 || flip_pend[0] < 0 || !a6_fence_done(&gpu, flip_pend_fence[0]) ||
+ 	    (a6_rd(CTL0_FLUSH) & flip_flush) != 0) {
+ 		return;
+ 	}
+-	flip_to_locked(flip_pending);
+-	flip_pending = -1;
++	int f = flip_pend[0];
++	if (flip_pend[1] >= 0 && a6_fence_done(&gpu, flip_pend_fence[1])) {
++		/* both are finished: the newer one goes on screen, the older one is late */
++		f = flip_pend[1];
++		flip_pend[0] = -1;
++		flip_skipped++;
++	} else {
++		flip_pend[0] = flip_pend[1];
++		flip_pend_fence[0] = flip_pend_fence[1];
++	}
++	flip_pend[1] = -1;
++	flip_to_locked(f);
++	flip_tc_tries = 0;      /* the one still waiting gets its own 60 ms of polling */
+ 	if (++flip_count <= 3 || (flip_count % 3600) == 0) {
+ 		a6_log("flip: %llu frames flipped (now %d), %llu drawn over while waiting\n", flip_count, flip_front,
+ 		    flip_skipped);
+@@ -838,7 +857,7 @@ flip_tc_fire(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+ 	bool again;
+ 	lck_mtx_lock(&sweet_gpu_lock);
+ 	flip_poll_locked();
+-	again = flip_state == 1 && flip_pending >= 0 && ++flip_tc_tries < 60;
++	again = flip_state == 1 && flip_pend[0] >= 0 && ++flip_tc_tries < 60;
+ 	lck_mtx_unlock(&sweet_gpu_lock);
+ 	if (again) {
+ 		flip_tc_arm();
+@@ -876,7 +895,7 @@ sweet_gpu_flip_reset(void)
+ 		return;
+ 	}
+ 	lck_mtx_lock(&sweet_gpu_lock);
+-	flip_pending = -1;
++	flip_pend[0] = flip_pend[1] = -1;
+ 	if (flip_front != 0) {
+ 		flip_to_locked(0);
+ 	}
+@@ -1215,8 +1234,10 @@ sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h,
+ 		gpu_owner_locked(present_fence[k], 0);
+ 		rc = present_fence[k] ? 0 : -1;
+ 		if (rc == 0 && flip_state == 1) {
+-			flip_pending = target;
+-			flip_pending_fence = present_fence[k];
++			/* the frame drawn over keeps its place with the new fence; a new one waits behind the older one */
++			int slot = flip_pend[0] < 0 || flip_pend[0] == target ? 0 : 1;
++			flip_pend[slot] = target;
++			flip_pend_fence[slot] = present_fence[k];
+ 			flip_tc_tries = 0;
+ 			flip_tc_arm();
+ 		}
+-- 
+2.56.1
+
