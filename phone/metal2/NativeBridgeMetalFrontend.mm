@@ -5123,11 +5123,9 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
 #if TARGET_OS_IPHONE
  // The target's base class ABI (iPadOS 17.7.11, 536 bytes): the dynamic subclass adds no instance variables and reads none of the base's,
  // so only 17's size is held to; the arm64e build (iPadOS 27, whose _MTLDevice is larger) needs the class to exist.
-#if defined(__arm64e__)
+ // iOS 26 (raphael, arm64 slice): _MTLDevice is larger than 17's 536 bytes; the subclass reads none of its variables, so only its
+ // existence is required, as on the arm64e build.
  if(!base){NBLOG(@"native-metal: no _MTLDevice");return nil;}
-#else
- if(!base || class_getInstanceSize(base)!=536){NBLOG(@"native-metal: unexpected _MTLDevice ABI");return nil;}
-#endif
 #endif
  if(!base)base=[NSObject class];
  Class cls=objc_allocateClassPair(base,"NativeBridgeMetalDevice",0);if(!cls)return nil;
