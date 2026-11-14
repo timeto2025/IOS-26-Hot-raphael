@@ -5,6 +5,53 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 14:10 MSK: live session on the owner's PC: GPU fault, GPU pool, frames lost at the flip; xnu 0186 + 0187
+Phone on xnu 0185 + ul-v2 (GPUABI=2), one boot watched from 34 s to 23 min. Branch `ci/xnu-0187` (not merged to master):
+xnu run 43587278650. Mirrors in ~/raphael-mirrors (76 of 76), kernel tree in ~/raphael-xnu/xnu (commits for 0186, 0187).
+- **Observed: the GPU fault again, another address**: 54.476 s "smmu fsr 2 far 0 fsynr0 30002", ib1 000000130d52c000
+  rem 2a8, ib2 0; iconservicesagent[228] restarted. Both boots a read; both boots IB1 lies in the window of
+  iconservicesagent (window n = 0x1000000000 + n * 4 GB in the order the clients opened, read from mtl2.log: an inference,
+  the kernel did not log the owner). The old boot's three faults all carried the same far 120a338180.
+- **Read in the code, corrects the 13:40 guess**: BoFree does not unmap at once: the buffer waits in a ring for the last
+  fence submitted (sweet_v2_retire_bo). What does turn one fault into three restarted processes: the SMMU bank had no
+  SCTLR.HUPCF, so after one fault every GPU access failed until FSR was cleared, which happened only in the reset a second
+  later (gpu_hung_locked 1000 ms), and the reset kills every client with a fence in the lost range. Linux (arm-smmu-qcom.c,
+  HUPCF for Adreno) and UniXNU's NativeAdreno (endFault) end the fault and go on.
+- **Not known: what reads the unmapped address.** Candidates in Turnip d8210e0: lazily allocated memory (memoryless
+  textures are a GPU range with no buffer until a pass needs one, darwin_sparse_vma_init); a buffer freed between recording
+  and submit (Turnip's retire fence is its last *submitted* fence). UniXNU's gts7xlwifi record names a Turnip patch
+  "t970-bo-safe" (command buffers recycled while a submission still uses them); it is in none of the 76 mirrors.
+- **xnu 0186 (unbuilt at the time of writing)**: HUPCF on the GPU's bank; a latched fault is recorded and ended at fence
+  waits, submits and presents (the hang check still resets a GPU that stands still); `sweetgpuhupcf=0` = as before.
+  Report in klog, "SWEET GPU: fault N": fsr/far/read or write, the IB the CP was in with its submitter (last 256 IBs),
+  "far lies in X + L, unmapped N ms before" (last 128 unmaps), what the owning client has at far and at ib1 (its buffer, or
+  the nearest ones), a freed buffer still in the ring, the IB's words around the CP and the addresses in it within 64 MB
+  below far. With this the next fault names its cause.
+- **Observed: frames lost at the flip (kernel bug, likely the lag under load)**: scrolling Settings by `swipe` commands,
+  GPU 94-98 % busy, backboardd 2 submits a frame at 8.2 ms each (16.4 ms + 1.15 ms present): 53-56 presents a second but
+  "flip 1: 20 flipped" of 279, 42 of 267, 45 of 206, 89 of 212. flip_pending was one slot: the next present took the third
+  frame and replaced the waiting one, which was never shown nor counted. At light load flipped = swaps.
+  **xnu 0187 (unbuilt)**: two frames wait in order; both finished: the newer is shown; a third present draws over the newer.
+- **Observed: GPU pool, Turnip's buffer cache**: with the cache backboardd went 494 -> 883 MB in 0.3 s when Maps opened
+  (87.5 s), 5 buffers of 83886080 bytes: darwin_size_class rounds every cacheable buffer up to a quarter power of two, so
+  the Metal runtime's 68 MB block costs 80. Pool 1233 of 1268 MB, 64004 refusals by 780 s, backboardd 952 MB held with the
+  display off for 10 min, 966 allocations >= 8 MB (7728 MB) in one 5 s window, cache hits 0.0-0.3 % ("NativeAdreno BO
+  cache: 61440 allocations, 29 reused"; the MemoryPressure flag of 0185 flushes it while the pool refuses).
+  **Test without a build**: `echo TU_DARWIN_BO_CACHE=0 > /var/local/mtl2-env` (HotMetal2 reads KEY=VALUE lines there),
+  `kill -9` backboardd. After: backboardd 101 MB idle, 311 MB with Maps open (Maps itself 153 MB, was 85), 364 MB (peak
+  448) after nine apps and the switcher; pool 859 of 1268 MB, no new refusal, no fault. One run each, different histories.
+  The file is still on the phone. raphael-ios-boot.sh: `MTL2_ENV` (default TU_DARWIN_BO_CACHE=0) stages it.
+- **RAM**: after nine apps free 133 MB, anonymous 1788 MB, file 1652 MB, wired 476 MB; the compressor started at 1131 s
+  and holds 118 MB as 28 MB; "Failed to open swap file 2" once (no swap directory), nothing killed. Not the limit now.
+- Also: fileproviderd SIGABRT at 83.7 s; Maps draws its grid without tiles; RTC reset again (clock from the build time);
+  LE commands 0x200b/0x200c status 0xc 13 + 25 times; battery 25.0 C fixed; ssh needs
+  `-o UserKnownHostsFile=FILE -o StrictHostKeyChecking=accept-new` here (the phone's host key differs from the one in
+  ~/.ssh/known_hosts line 3, which was left alone).
+- **Next**: 1. flash the 0187 kernel (image with MTL2_ENV default), check "flipped" against swaps while scrolling and read
+  the first "fault N" report; 2. fix the reader in Turnip from that report; 3. GPU time of a frame (2 submits x 8.2 ms for
+  a Settings scroll at 585 MHz: binning/sysmem choice per pass, pass count); 4. keep the size classes for small buffers only
+  in our Turnip build instead of the environment switch; 5. the 13:40 list's item 4.
+
 ### raphael, 2026-11-14 13:40 MSK: xnu 0184+0185 and Turnip on kernel ABI v2 flashed; work moves to the owner's PC
 Logs: raphael-logs-20261114-131738 (3 min 24 s of uptime). Kernel: xnu run 43583330657 (0185). HotMetal2: userland run
 43583341137 on `ci/adrenometal` (Turnip from UniXNU d8210e0, `GPUABI=2`). The phone is a plain K20 Pro (SM8150, not -AC).
