@@ -154,6 +154,7 @@ enum {
 	kAudioDevicePropertySafetyOffset = 'saft', kAudioDevicePropertyNominalSampleRate = 'nsrt',
 	kAudioDevicePropertyAvailableNominalSampleRates = 'nsr#', kAudioDevicePropertyIsHidden = 'hidn',
 	kAudioDevicePropertyPreferredChannelsForStereo = 'dch2', kAudioDevicePropertyZeroTimeStampPeriod = 'ring',
+	kAudioDevicePropertyClockAlgorithm = 'clok', kAudioDevicePropertyClockIsStable = 'cstb',
 	kAudioSelectorControlClassID = 'slct', kAudioDataSourceControlClassID = 'dsrc',
 	kAudioSelectorControlPropertyCurrentItem = 'scci', kAudioSelectorControlPropertyAvailableItems = 'scai',
 	kAudioSelectorControlPropertyItemName = 'scin', kAudioSelectorControlPropertyItemKind = 'clkk',
@@ -769,6 +770,19 @@ property(AudioObjectID object, const AudioObjectPropertyAddress *address, UInt32
 			break;
 		case kAudioDevicePropertyZeroTimeStampPeriod:
 			WORD(TIMESTAMP_PERIOD);
+			break;
+		/*
+		 * iOS 26's CoreAudio takes 500 host ticks per frame at 48 kHz (a 24 MHz host clock, as on Apple's SoCs)
+		 * while mach_absolute_time runs at 19.2 MHz here (400 ticks per frame, what these timestamps say):
+		 * with a "stable" clock and the raw algorithm it re-anchored every ~0.4 s ("Sample time is consecutive,
+		 * host time is not consecutive"), rate scalar 0.85/1.0, and skipped IO cycles (HAL 38-43k frames/s).
+		 * Not stable + the 12-point moving average: the host measures the rate from the timestamps instead.
+		 */
+		case kAudioDevicePropertyClockIsStable:
+			WORD(0);
+			break;
+		case kAudioDevicePropertyClockAlgorithm:
+			WORD('mavg');
 			break;
 		}
 	} else {

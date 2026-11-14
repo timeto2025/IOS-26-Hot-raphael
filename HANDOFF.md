@@ -5,6 +5,16 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 03:25 MSK: CoreAudio assumes a 24 MHz host clock
+- adspd feed with HotAudio's cycle info: CoreAudio's mDeviceHostTicksPerFrame = 500.000 (24 MHz / 48 kHz) at every
+  re-anchor, drifting to 406.25/425 before the next; our timestamps (mach_timebase_info, 19.2 MHz) say 400.000.
+  iOS 26 apparently takes Apple's 24 MHz timebase for granted somewhere in the HAL clock. HAL now answers
+  ClockIsStable = 0 and ClockAlgorithm = 'mavg' so the host measures the rate instead of re-anchoring.
+  If that is not enough: present a 24 MHz timebase to user space (kernel), or interpose in audiomxd.
+- REDUCE_FX=1 (Reduce Transparency/Motion via com.apple.Accessibility.plist): backboardd frames mostly 1 pass /
+  2.7 Mpx (was up to 35 passes / 31 Mpx). Settings > Accessibility hangs in NanoRegistry again (XPC 4099):
+  check that the overlay really kept com.apple.nanoregistryd.
+
 ### raphael, 2026-11-14 03:00 MSK: CoreAudio overloads + rate scalar 0.85
 - oslog audiomxd during a ringtone: 42x "HALS_OverloadMessage: Overload possibly due to safety violation", 21x
   "HALS_IORawClock::Update: Re-anchoring IO timeline. Sample time is consecutive, host time is not consecutive",
