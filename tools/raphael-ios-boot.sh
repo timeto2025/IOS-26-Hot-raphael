@@ -38,6 +38,13 @@ if [[ -n "${EXTRA_USERLAND:-}" ]]; then
 	tar -xzf "$EXTRA_USERLAND" -C "$WORK/userland"
 	echo "extra userland: $(tar -tzf "$EXTRA_USERLAND" | grep -c '^./bin/.') tools from $EXTRA_USERLAND"
 fi
+# METAL2_FROM=ios-userland.tar.gz (the userland workflow's artifact): take only its HotMetal2.bundle (a Metal driver
+# build to test) over the base userland's.
+if [[ -n "${METAL2_FROM:-}" ]]; then
+	rm -rf "$WORK/userland/Extensions/HotMetal2.bundle"
+	tar -xzf "$METAL2_FROM" -C "$WORK/userland" ./Extensions/HotMetal2.bundle
+	echo "HotMetal2.bundle from $METAL2_FROM ($(du -sh "$WORK/userland/Extensions/HotMetal2.bundle" | cut -f1))"
+fi
 
 CMDLINE="debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress"
 CMDLINE+=" rd=ufsroot0 ufsroot=darwin ufsrw=1 rootrw=1 ufslogsecs=5"
@@ -56,6 +63,9 @@ CMDLINE+=" sweetfb_noconsole=1 flamereboot=0 sweetrtcoff=$RTCOFF"
 # TIMEBASE24=1 (default): mach_absolute_time runs at 24 MHz as on Apple's SoCs (xnu 0183). iOS assumes it:
 # Swift Task.sleep/debounce deadlines (ns * 3 / 125), CoreAudio's host clock. TIMEBASE24=0: the raw 19.2 MHz counter.
 [ "${TIMEBASE24:-1}" = 1 ] && CMDLINE+=" sweettimebase=24000000"
+# The image's build time (xnu 0184): when the RTC was reset (battery ran flat) and RTC + sweetrtcoff is before it,
+# the clock starts from here instead of a date months back. tools/raphael-rtc.py recalibrates the offset.
+CMDLINE+=" sweettime=$(date +%s)"
 if [[ "${USB:-1}" == 0 ]]; then CMDLINE+=" sweetusb=0"; else CMDLINE+=" sweetusb=2 sweetusbframes=0"; fi
 # WIFI=1: Wi-Fi bridge on (sweetwifid=1) and this board's carve-outs for wland, from raphael's DT
 # (tools/raphael-wifi-facts.py): modem_region 0x8e000000+0x9600000, pil_wlan_fw_region (MSA)
@@ -73,7 +83,7 @@ if [[ -n "${GPUFW:-}" ]]; then
 	gpu_args=(--gpufw "$GPUFW")
 	# GPU pool reserve for backboardd/SpringBoard (default 160 MB): with v0.8.1's HotMetal2 those two hold
 	# ~750 of 944 MB on raphael, so every other Metal client (keyboard, apps) was refused. GPURESERVE= overrides.
-	CMDLINE+=" sweetgpu=1 hotmtl=2 sweetgpufreq=6 sweetgpureserve=${GPURESERVE:-32}"
+	CMDLINE+=" sweetgpu=1 hotmtl=2 sweetgpufreq=${GPUFREQ:-5} sweetgpuabi=${GPUABI:-1} sweetgpureserve=${GPURESERVE:-32}"
 else
 	CMDLINE+=" sweetgpu=0"
 fi
@@ -81,6 +91,8 @@ fi
 # Canvas 1125x2499 like RMX1931: the kernel's framebuffer (SWEET_FB_LOGICAL_H) and touch (SweetHID)
 # present a 1125x2499 display; a 2437 ADT canvas made backboardd render 1125x2437 into it and
 # grow its GPU pool share until allocations failed (missing icons, wallpaper, Control Center).
+# GPUFREQ=1..6: GPU clock step (5 = 585 MHz, the top of SM8150; 6 = 675 MHz exists on SM8150-AC only).
+# GPUABI=1|2: the version the kernel tells Turnip (1: Turnip pinned at UniXNU cd1b975; 2: Turnip from UniXNU HEAD).
 # EXTRA_ARGS="a=1 b=2": appended to the boot args (A/B tests, e.g. raphpanel=0 or GPURESERVE checks)
 # CANVAS_H (default 2436, kernel 0167+): the canvas iOS draws, 1125 wide. 2436 is the iPhone 11 Pro's own
 # (375x812 points @3x) and the K20 Pro panel's shape (1125x2436 x 0.96 = 1080x2339): no bars, no stretch.

@@ -1,0 +1,316 @@
+From 81dee64bcb1d99db6fa54772084d8b0d1de6f78b Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 13:01:44 +0300
+Subject: [PATCH] sweet: GPU ABI 2 (128-buffer submits, priority, notes,
+ pressure flag), 585 MHz GPU ceiling, Wi-Fi noise/PHY/powersave gets
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/redwood_apple80211.c          | 21 +++++++
+ bsd/dev/sweet_gpu.c                   | 18 +++++-
+ iokit/Kernel/arm/SweetAccelerator.cpp | 88 ++++++++++++++++++++++++---
+ iokit/Kernel/arm/SweetGPUABI.h        | 37 ++++++++---
+ 4 files changed, 146 insertions(+), 18 deletions(-)
+
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index 9ef95a0..a5d1cdf 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -565,6 +565,27 @@ get(struct apple80211req *request)
+ 	case 103:                               /* all of it, as a scan's result */
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
+ 		break;
++	case 17: {                              /* the noise: the same -95 dBm floor the scan results and link events carry */
++		struct {
++			uint32_t version, radios, unit;
++			int32_t each[4], all, each_ext[4], all_ext;
++		} answer = { .version = 1, .radios = 1, .each = { -95 }, .all = -95, .each_ext = { -95 }, .all_ext = -95 };
++
++		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
++		break;
++	}
++	case 14: {                              /* PHY modes: what WCN3990 has (11a 2, 11b 4, 11g 8, 11n 0x10, 11ac 0x80) and the
++		                                 * one in use, taken from the band alone: 11ac on 5 GHz, 11n on 2.4 GHz */
++		struct {
++			uint32_t version, supported, active;
++		} answer = { .version = 1, .supported = 2 | 4 | 8 | 0x10 | 0x80, .active = state->bss.frequency >= 5000 ? 0x80 : 0x10 };
++
++		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
++		break;
++	}
++	case 5:                                 /* power save: the station never asks the firmware for it (0: disabled) */
++		request->req_val = 0;
++		break;
+ 	case 2: {				/* how it was joined: open system, then WPA2 when Privacy cap bit set */
+ 		struct {
+ 			uint32_t version, lower, upper, extended;
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 804b5e4..38f231a 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -299,7 +299,7 @@ sweet_gpu_init(void)
+ 	}
+ 	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
+ 	a6_init_state(&gpu, ptoa_64(pn));
+-	uint32_t lvl = 6;	/* 675 MHz NOM_L1 on SM8150-AC (585 on SM8150); boot-arg sweetgpufreq=1..6 */
++	uint32_t lvl = 5;	/* 585 MHz NOM, the top step of SM8150 (raphael); 6 = 675 MHz NOM_L1 exists on SM8150-AC only. boot-arg sweetgpufreq=1..6 */
+ 	PE_parse_boot_argn("sweetgpufreq", &lvl, sizeof(lvl));
+ 	gpu.perf_level = lvl;
+ 	pool_kva = va;
+@@ -1347,6 +1347,8 @@ sweet_gpu_pool_avail(void)
+ static bool gpool_ready;
+ static LCK_MTX_DECLARE(sweet_gpool_lock, &sweet_gpu_grp);
+ 
++static volatile uint64_t gpool_refused_at;      /* mach_absolute_time of the last refusal */
++
+ /* First fit: the physical address of `bytes` (rounded to 16 KB), zeroing is the caller's. 0 = ok. */
+ int sweet_gpu_pool_try_alloc(uint64_t bytes, uint64_t *pa);
+ int
+@@ -1423,6 +1425,7 @@ sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa)
+ 	}
+ 	/* at most one line a second: 110 a second went to the log */
+ 	uint64_t now = mach_absolute_time(), age_ns = 0;
++	gpool_refused_at = now;
+ 	absolutetime_to_nanoseconds(now - last_log, &age_ns);
+ 	bool say = last_log == 0 || age_ns >= NSEC_PER_SEC;
+ 	if (say) {
+@@ -1436,6 +1439,19 @@ sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa)
+ 	return -1;
+ }
+ 
++/* A refusal within the last second: user clients tell their processes to give cached buffers back (ABI 2 MemoryPressure) */
++bool sweet_gpu_pool_refused_recently(void);
++bool
++sweet_gpu_pool_refused_recently(void)
++{
++	uint64_t at = gpool_refused_at, ns = 0;
++	if (at == 0) {
++		return false;
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time() - at, &ns);
++	return ns < NSEC_PER_SEC;
++}
++
+ void
+ sweet_gpu_pool_free(uint64_t pa, uint64_t bytes)
+ {
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+index 69fdb47..5d4afd8 100644
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -73,6 +73,7 @@ bool sweet_gpu_lost(uint64_t *epoch, uint32_t last_fence);
+ uint64_t sweet_gpu_recoveries(void);
+ uint64_t sweet_gpu_timestamp(void);
+ int sweet_gpu_pool_try_alloc(uint64_t bytes, uint64_t *pa);
++bool sweet_gpu_pool_refused_recently(void);
+ int sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa);
+ uint64_t sweet_gpu_pool_avail(void);
+ void sweet_gpu_pool_free(uint64_t pa, uint64_t bytes);
+@@ -1119,10 +1120,19 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 	switch (method) {
+ 	case NativeAdrenoMethodQuery: {
+ 		V2_OUT(NativeAdrenoAbiParams);
+-		rp->abi_version = NativeAdrenoAbiVersion;
++		/* sweetgpuabi=1: an old Turnip (16-buffer submits) refuses any other version; both record sizes are served either way */
++		static uint32_t abi;
++		if (abi == 0) {
++			uint32_t v = NativeAdrenoAbiVersion;
++			PE_parse_boot_argn("sweetgpuabi", &v, sizeof(v));
++			abi = v == 1 ? 1 : NativeAdrenoAbiVersion;
++			IOLog("SWEET MTL: v2 clients are told ABI %u\n", abi);
++		}
++		rp->abi_version = abi;
+ 		rp->input_bits = 39;
+ 		rp->output_bits = 36;
+-		rp->flags = NativeAdrenoParamsHostImport;
++		/* MemoryPressure: the pool refused a buffer within the last second, so the client's cache of freed buffers goes back */
++		rp->flags = NativeAdrenoParamsHostImport | (sweet_gpu_pool_refused_recently() ? NativeAdrenoParamsMemoryPressure : 0u);
+ 		rp->max_bo_bytes = 1ULL << NativeAdrenoAbiMaxBoBytesShift;
+ 		return kIOReturnSuccess;
+ 	}
+@@ -1379,15 +1389,26 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 	case NativeAdrenoMethodBoCpuUnmap:
+ 		return kIOReturnSuccess;        /* the mapping is the client's (IOConnectUnmapMemory64) */
+ 	case NativeAdrenoMethodSubmit: {
+-		V2_IN(NativeAdrenoAbiSubmit);
++		/* the record of ABI 2 (128 buffers) or of ABI 1 (16): the same 32-byte head, then the buffers */
++		const uint32_t head = (uint32_t)__builtin_offsetof(NativeAdrenoAbiSubmit, buffers);
++		uint32_t cap;
++		if (in != NULL && inSize == sizeof(NativeAdrenoAbiSubmit)) {
++			cap = NativeAdrenoAbiMaxBuffers;
++		} else if (in != NULL && inSize == head + NativeAdrenoAbiV1MaxBuffers * sizeof(NativeAdrenoAbiSubmitBuffer)) {
++			cap = NativeAdrenoAbiV1MaxBuffers;
++		} else {
++			return kIOReturnBadArgument;
++		}
++		const NativeAdrenoAbiSubmit *rq = (const NativeAdrenoAbiSubmit *)in;
+ 		V2_OUT(NativeAdrenoAbiSubmitReply);
+ 		(void)sweet_v2_reap_retired();
+-		if (rq->buffer_count == 0 || rq->buffer_count > NativeAdrenoAbiMaxBuffers || rq->reserved) {
++		const uint32_t count = rq->buffer_count;
++		if (count == 0 || count > cap || rq->reserved) {
+ 			return kIOReturnBadArgument;
+ 		}
+ 		uint64_t iova[NativeAdrenoAbiMaxBuffers];
+ 		uint32_t dw[NativeAdrenoAbiMaxBuffers];
+-		for (uint32_t i = 0; i < rq->buffer_count; i++) {
++		for (uint32_t i = 0; i < count; i++) {
+ 			const NativeAdrenoAbiSubmitBuffer *b = &rq->buffers[i];
+ 			if ((b->bytes & 3) || b->bytes == 0 || b->bytes / 4 > 0xfffff || b->iova < fWinBase ||
+ 			    b->iova + b->bytes > fWinBase + fWinSize) {
+@@ -1399,10 +1420,26 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 		if (rq->wait_fence != 0 && sweet_gpu_wait_fence_ns((uint32_t)rq->wait_fence, rq->wait_timeout_ns)) {
+ 			return kIOReturnTimeout;
+ 		}
+-		bool busy = false;
+-		uint32_t fence = sweet_gpu_submit_v2(iova, dw, rq->buffer_count, &busy);
+-		if (fence == 0) {
+-			return busy ? kIOReturnBusy : kIOReturnNotReady;
++		/* The ring takes A6_SUBMIT_MAX (16) IBs a submission: a longer list goes in as several, in order. Only the first may
++		 * be refused as busy (the client then sends the whole list again); a later part waits for the one before it instead,
++		 * so no part is ever queued twice. */
++		uint32_t fence = 0;
++		for (uint32_t at = 0; at < count;) {
++			const uint32_t n = count - at > 16 ? 16 : count - at;
++			bool busy = false;
++			uint32_t f = sweet_gpu_submit_v2(iova + at, dw + at, n, &busy);
++			if (f == 0) {
++				if (at == 0) {
++					return busy ? kIOReturnBusy : kIOReturnNotReady;
++				}
++				if (!busy || sweet_gpu_wait_fence_ns(fence, 2000000000ULL)) {
++					IOLog("SWEET MTL: submit of %u IBs stopped after %u (%s)\n", count, at, busy ? "ring full for 2 s" : "GPU not usable");
++					return kIOReturnNotReady;
++				}
++				continue;
++			}
++			fence = f;
++			at += n;
+ 		}
+ 		if (fSystem) {
+ 			sweet_cpufreq_boost();
+@@ -1416,6 +1453,39 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 		rp->fence = fence;
+ 		return kIOReturnSuccess;
+ 	}
++	case NativeAdrenoMethodSetPriority: {
++		/* one ring and no preemption between clients here: the priorities are checked and kept, nothing is scheduled by them */
++		V2_IN(NativeAdrenoAbiPriority);
++		if (rq->foreground > 5 || rq->foreground == 3 || rq->background > 5) {
++			return kIOReturnBadArgument;
++		}
++		return kIOReturnSuccess;
++	}
++	case NativeAdrenoMethodNote: {
++		/* a client's own note for the kernel log: its slow render passes (kind 1) and pipelines (kind 2); at most 4 a second */
++		V2_IN(NativeAdrenoAbiNote);
++		if (rq->count > NativeAdrenoNoteWords) {
++			return kIOReturnBadArgument;
++		}
++		static uint64_t note_sec;
++		static uint32_t note_n;
++		clock_sec_t s; clock_usec_t us;
++		clock_get_system_microtime(&s, &us);
++		if ((uint64_t)s != note_sec) {
++			note_sec = (uint64_t)s;
++			note_n = 0;
++		}
++		if (note_n++ < 4) {
++			char line[NativeAdrenoNoteWords * 9 + 1];
++			size_t l = 0;
++			for (uint32_t i = 0; i < rq->count; i++) {
++				l += (size_t)snprintf(line + l, sizeof(line) - l, " %x", rq->words[i]);
++			}
++			line[l] = 0;
++			IOLog("SWEET MTL: note pid %d kind %u:%s\n", proc_selfpid(), rq->kind, line);
++		}
++		return kIOReturnSuccess;
++	}
+ 	case NativeAdrenoMethodWaitFence: {
+ 		V2_IN(NativeAdrenoAbiWaitFence);
+ 		return sweet_gpu_wait_fence_ns((uint32_t)rq->fence, rq->timeout_ns) ? kIOReturnTimeout : kIOReturnSuccess;
+diff --git a/iokit/Kernel/arm/SweetGPUABI.h b/iokit/Kernel/arm/SweetGPUABI.h
+index 0c6e483..e433c35 100644
+--- a/iokit/Kernel/arm/SweetGPUABI.h
++++ b/iokit/Kernel/arm/SweetGPUABI.h
+@@ -1,5 +1,6 @@
+-/* NativeAdreno user-client ABI v1 (UniXNU drivers/NativeAdreno/NativeAdrenoABI.h, MIT): what Turnip's darwin backend
+- * (work/turnip/mesa src/freedreno/vulkan/tu_knl_darwin.cc) speaks. SweetAccelerator.cpp serves it to v2 clients. */
++/* NativeAdreno user-client ABI v2 (UniXNU drivers/NativeAdreno/NativeAdrenoABI.h, MIT): what Turnip's darwin backend
++ * (work/turnip/mesa src/freedreno/vulkan/tu_knl_darwin.cc) speaks. SweetAccelerator.cpp serves it to v2 clients, and still
++ * takes a v1 client's 16-buffer submit record (boot-arg sweetgpuabi=1 makes Query answer version 1 for an old Turnip). */
+ /* SPDX-License-Identifier: MIT */
+ #ifndef NATIVE_ADRENO_ABI_H
+ #define NATIVE_ADRENO_ABI_H
+@@ -13,9 +14,8 @@
+  * disagrees with the storage. Unknown versions, methods and flags are refused
+  * rather than ignored. */
+ enum {
+-    NativeAdrenoAbiVersion = 1,
+-    NativeAdrenoAbiMaxBuffers = 16,
+-    NativeAdrenoAbiMaxBoBytesShift = 28, /* 256MiB per object */
++    NativeAdrenoAbiVersion = 2,
++    NativeAdrenoAbiMaxBuffers = 128,   /* a frame's IBs in one submission (Turnip splits a larger one) */
+     NativeAdrenoMethodQuery = 1,
+     NativeAdrenoMethodBoAlloc = 2,
+     NativeAdrenoMethodBoMap = 3,
+@@ -32,8 +32,11 @@ enum {
+     NativeAdrenoMethodBoCpuUnmap = 14,
+     NativeAdrenoMethodGetDeviceInfo = 15,
+     NativeAdrenoMethodBoImport = 16,
++    NativeAdrenoMethodSetPriority = 17,
++    NativeAdrenoMethodNote = 18,
+     NativeAdrenoAbiMetadataBytes = 64,
+-    NativeAdrenoAbiMaxQueues = 8
++    NativeAdrenoAbiMaxBoBytesShift = 28, /* ours: 256MiB per object */
++    NativeAdrenoAbiV1MaxBuffers = 16     /* ours: the v1 submit record held 16 buffers (416 bytes) */
+ };
+ struct NativeAdrenoAbiParams {
+     uint32_t abi_version;
+@@ -43,7 +46,9 @@ struct NativeAdrenoAbiParams {
+     uint64_t max_bo_bytes;
+ };
+ enum {
+-    NativeAdrenoParamsHostImport = 1  /* BoImport pins the caller's own pages (an IOSurface's) as a BO */
++    NativeAdrenoParamsHostImport = 1,  /* BoImport pins the caller's own pages (an IOSurface's) as a BO */
++    NativeAdrenoParamsOwnedCoherent = 2, /* BOs are cacheable for the CPU and mapped write-back inner-shareable for the GPU (IO coherence): map them with the default cache mode, not write-combined */
++    NativeAdrenoParamsMemoryPressure = 4   /* now: the system could not give the last user BO its memory; give cached BOs back */
+ };
+ struct NativeAdrenoAbiBoAlloc {
+     uint64_t bytes;               /* 4KiB multiple, <= max_bo_bytes */
+@@ -116,6 +121,22 @@ struct NativeAdrenoAbiBoCpuUnmap {
+     uint32_t token;               /* exactly the token returned by map */
+     uint32_t reserved;            /* zero */
+ };
++/* The GPU priorities the process's Metal queues asked for, in Metal's numbering (MTLGPUPriority: 0 high, 1 normal, 2 low, 3 disabled,
++ * 4 normal-high, 5 real-time; the strongest of its queues): foreground while the process renders visible UI, background otherwise (its
++ * GPU role, task_get_gpu_role). A new connection has normal and disabled, a new Metal queue's values. */
++struct NativeAdrenoAbiPriority {
++    uint32_t foreground;          /* 0..5, 3 refused */
++    uint32_t background;          /* 0..5 */
++};
++/* A note a process leaves in the kernel's log (the board's export writes it as a row of kernel.rings.txt), for what only the process knows
++ * and has no file of its own to put it in (a sandboxed extension): its slow render passes and the pipelines it made or was refused.
++ * kind 1 pass, 2 pipeline; the words are the kind's record (NativeAdrenoNotePass, NativeAdrenoNotePipeline in the frontend). */
++enum { NativeAdrenoNoteWords = 30, NativeAdrenoNotePass = 1, NativeAdrenoNotePipeline = 2 };
++struct NativeAdrenoAbiNote {
++    uint32_t kind;
++    uint32_t count;               /* words used, <= NativeAdrenoNoteWords */
++    uint32_t words[NativeAdrenoNoteWords];
++};
+ struct NativeAdrenoAbiQueue {
+     uint64_t queue;               /* zero for create, an open id for close */
+ };
+@@ -153,7 +174,7 @@ static_assert(sizeof(NativeAdrenoAbiBoAlloc) == 16, "ABI alloc layout");
+ static_assert(sizeof(NativeAdrenoAbiBoMap) == 32, "ABI map layout");
+ static_assert(sizeof(NativeAdrenoAbiBoImport) == 16, "ABI import layout");
+ static_assert(sizeof(NativeAdrenoAbiSubmitBuffer) == 24, "ABI buffer layout");
+-static_assert(sizeof(NativeAdrenoAbiSubmit) == 416, "ABI submit layout");
++static_assert(sizeof(NativeAdrenoAbiSubmit) == 32 + 24 * NativeAdrenoAbiMaxBuffers, "ABI submit layout");
+ static_assert(sizeof(NativeAdrenoAbiBoCpuMap) == 8, "ABI cpu map layout");
+ static_assert(sizeof(NativeAdrenoAbiBoCpuMapReply) == 16, "ABI cpu map reply layout");
+ static_assert(sizeof(NativeAdrenoAbiBoCpuUnmap) == 16, "ABI cpu unmap layout");
+-- 
+2.43.0
+
