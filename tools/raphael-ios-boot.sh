@@ -184,6 +184,19 @@ if [[ "${AUDIO:-0}" == 1 ]]; then
 	[[ -d "$WORK/userland/HAL/HotAudio.driver" ]] || echo "Audio: warning: no HAL/HotAudio.driver in the userland"
 	echo "Audio: adspd + TFA9874 container staged"
 fi
+# REDUCE_FX=1: Reduce Transparency + Reduce Motion preset in com.apple.Accessibility (mobile's preferences), for when
+# Settings > Accessibility does not open. backboardd's blur runs on Apple tile shaders that HotMetal2 refuses
+# (tile_simd_blur_*, tile_downsample_*): the fallback costs ~35 passes / 31 Mpx per frame. REDUCE_FX=0 writes them off.
+if [[ -n "${REDUCE_FX:-}" ]]; then
+	python3 - "$WORK/com.apple.Accessibility.plist" "$REDUCE_FX" <<'PY'
+import plistlib, sys
+on = sys.argv[2] == '1'
+plistlib.dump({'EnhancedBackgroundContrastEnabled': on, 'ReduceMotionEnabled': on,
+               'ReduceMotionReduceSlideTransitionsPreference': on}, open(sys.argv[1], 'wb'), fmt=plistlib.FMT_BINARY)
+PY
+	overlay_args+=(--extra "$WORK/com.apple.Accessibility.plist:private/var/mobile/Library/Preferences/com.apple.Accessibility.plist:0600")
+	echo "Accessibility: Reduce Transparency + Reduce Motion = $REDUCE_FX"
+fi
 # MTL2_CLIENTS='* -chronod ...' (spaces or newlines): which processes get HotMetal2 (/var/local/mtl2-clients);
 # default as upstream: everyone but chronod, cameracaptured, WidgetRenderer_Default and PosterBoard.
 if [[ -n "${MTL2_CLIENTS:-}" ]]; then

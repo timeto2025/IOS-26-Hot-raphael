@@ -1312,8 +1312,10 @@ def main():
                 raise ValueError(f'invalid --extra {spec!r}, expected SRC:DST[:OCTAL_MODE]')
             src, dst = parts[0], parts[1]
             fmode = int(parts[2], 8) if len(parts) == 3 else (0o755 if (os.stat(src).st_mode & 0o111) else 0o644)
+            # files in mobile's home belong to mobile (cfprefsd writes preferences back as that user)
+            owner = 501 if dst.startswith('private/var/mobile/') else 0
             with open(src, 'rb') as f:
-                add_ustar_bytes(tf, dst, f.read(), mode=fmode)
+                add_ustar_bytes(tf, dst, f.read(), mode=fmode, uid=owner, gid=owner)
 
     print(f'launchd.plist: {before_count} -> {after_count} LaunchDaemons '
           f'({renamed} _PanicOnCrash renamed, {len(removed)} stripped)')
