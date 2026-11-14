@@ -83,7 +83,7 @@ if [[ -n "${GPUFW:-}" ]]; then
 	gpu_args=(--gpufw "$GPUFW")
 	# GPU pool reserve for backboardd/SpringBoard (default 160 MB): with v0.8.1's HotMetal2 those two hold
 	# ~750 of 944 MB on raphael, so every other Metal client (keyboard, apps) was refused. GPURESERVE= overrides.
-	CMDLINE+=" sweetgpu=1 hotmtl=2 sweetgpufreq=6 sweetgpureserve=${GPURESERVE:-32}"
+	CMDLINE+=" sweetgpu=1 hotmtl=2 sweetgpufreq=${GPUFREQ:-5} sweetgpuabi=${GPUABI:-1} sweetgpureserve=${GPURESERVE:-32}"
 else
 	CMDLINE+=" sweetgpu=0"
 fi
@@ -91,6 +91,8 @@ fi
 # Canvas 1125x2499 like RMX1931: the kernel's framebuffer (SWEET_FB_LOGICAL_H) and touch (SweetHID)
 # present a 1125x2499 display; a 2437 ADT canvas made backboardd render 1125x2437 into it and
 # grow its GPU pool share until allocations failed (missing icons, wallpaper, Control Center).
+# GPUFREQ=1..6: GPU clock step (5 = 585 MHz, the top of SM8150; 6 = 675 MHz exists on SM8150-AC only).
+# GPUABI=1|2: the version the kernel tells Turnip (1: Turnip pinned at UniXNU cd1b975; 2: Turnip from UniXNU HEAD).
 # EXTRA_ARGS="a=1 b=2": appended to the boot args (A/B tests, e.g. raphpanel=0 or GPURESERVE checks)
 # CANVAS_H (default 2436, kernel 0167+): the canvas iOS draws, 1125 wide. 2436 is the iPhone 11 Pro's own
 # (375x812 points @3x) and the K20 Pro panel's shape (1125x2436 x 0.96 = 1080x2339): no bars, no stretch.
