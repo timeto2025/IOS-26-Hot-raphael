@@ -5,6 +5,21 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 12:25 MSK: HotMetal2 on AdrenoMetal (branch ci/adrenometal, userland run 43578686953)
+- phone/metal2 on branch ci/adrenometal: UniXNU AdrenoMetal frontend + bridge (metal2vulkan 555b13d5 + their 12 patches);
+  old frontend in phone/metal2/legacy. Test without merging: raphael-ios-boot.sh METAL2_FROM=<ios-userland.tar.gz>.
+- Fixes for iOS 26: AdrenoMetal refused every device on the arm64 slice (_MTLDevice size held to iPadOS 17's 536 bytes;
+  CoreAnimation fell back to OpenGL, backboardd asserted in ogl-context.cpp push_surface); textures/buffers/heaps take
+  MTLTextureImplementation/MTLResource/MTLAllocation again (25,690 "texture is not a MTLTextureImplementation." in 2 min).
+- CI: UniXNU's Mesa patches pinned at cd1b975 (later turnip-darwin-kmd needs kernel ABI v2: SetPriority/Note, OwnedCoherent/
+  MemoryPressure, 128 IBs). Cherry-picked to master.
+- User, with xnu 0183 + raphgpool=324 + REDUCE_FX=1 + darwin re-synced from the clean root image: app switcher and folders no
+  longer lag, the UI is partly more responsive; actions inside apps still hang a little.
+- Telemetry (first boot, cold cache): frame GPU times mostly 8-64 ms, backboardd ~0.8-1.1 core (ca.display.prim + encoder),
+  pool 930/1268 MB (backboardd ~590 MB); one runtime panic (replay.rs:118 index out of bounds, a command buffer refused);
+  render pipelines with FailOnBinaryArchiveMiss refused on a miss (CoreAnimation retries).
+- Open: app hangs, GPU frame time, memory; kernel ABI v2 for the newer Turnip; port the rest of legacy's iOS 26 fixes as needed.
+
 ### raphael, 2026-11-14 04:40 MSK: 24 MHz timebase for iOS (0183); audio clock verified
 - adspd13.log (0182 + HotAudio): `ticks/frame CA 400.000 ours 400.000`, `hostclock 2/1`; a ringtone ran at 48.0k fps with no
   underruns (200-224 s). 85-160 s (many short sounds) still 34-43k fps with underruns: the audio server is late, not the clock
