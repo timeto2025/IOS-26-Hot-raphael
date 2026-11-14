@@ -1,0 +1,223 @@
+From 2cd5ca47002c280c4df4a898332acddfd773d78a Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 04:06:48 +0300
+Subject: [PATCH] sweet: a 24 MHz timebase for iOS (boot-arg
+ sweettimebase=24000000)
+
+iOS assumes Apple's 24 MHz timer: libswift_Concurrency converts Task.sleep,
+debounce and timeout deadlines as ns * 3 / 125, so on the 19.2 MHz counter
+every one landed at 1.25x the counter value (a quarter of the uptime late),
+and CoreAudio's host clock is the same constant. The kernel scales every
+counter read by 5/4, converts decrementer values back, reports 24 MHz, and
+userspace takes mach_absolute_time through the trap (USER_TIMEBASE_NONE).
+From UniXNU droidvm-timebase-24mhz.patch (BSD-2-Clause-Patent). Log
+timestamps (sweet_ufs, sweet_poke) use the reported frequency.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/sweet_poke.c              |  2 +-
+ bsd/dev/sweet_ufs.c               |  3 +-
+ osfmk/arm64/machine_routines.c    | 55 ++++++++++++++++++++++++++++---
+ pexpert/arm/pe_identify_machine.c | 34 +++++++++++++++++++
+ 4 files changed, 87 insertions(+), 7 deletions(-)
+
+diff --git a/bsd/dev/sweet_poke.c b/bsd/dev/sweet_poke.c
+index 2465222..a9a6863 100644
+--- a/bsd/dev/sweet_poke.c
++++ b/bsd/dev/sweet_poke.c
+@@ -143,7 +143,7 @@ poke_line(const char *s, const char *end, unsigned lineno)
+ 	}
+ 	switch (op) {
+ 	case '@': {
+-		uint64_t target = a * POKE_TICKS_S;
++		uint64_t target = a * (gPEClockFrequencyInfo.timebase_frequency_hz ? gPEClockFrequencyInfo.timebase_frequency_hz : POKE_TICKS_S);
+ 		while (mach_absolute_time() < target) {
+ 			poke_sleep_ms(10);
+ 		}
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 219b73d..3fbfb04 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -811,7 +811,8 @@ sweet_log_append(const char *c, int size)
+ 				sweet_log_put(c + start, i - start);
+ 			}
+ 			char ts[24];
+-			uint64_t ms = mach_absolute_time() / 19200;
++			uint64_t tb_khz = gPEClockFrequencyInfo.timebase_frequency_hz / 1000;
++			uint64_t ms = mach_absolute_time() / (tb_khz ? tb_khz : 19200); /* sweettimebase: 24 MHz */
+ 			int n = snprintf(ts, sizeof(ts), "[%4llu.%03llu] ", ms / 1000, ms % 1000);
+ 			sweet_log_put(ts, n);
+ 			start = i;
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 8b93bf7..94357a9 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -496,9 +496,15 @@ user_cont_hwclock_allowed(void)
+  *
+  */
+ 
++extern uint32_t ml_timebase_scale_num, ml_timebase_scale_den;   /* the timebase's scale (below, sweettimebase) */
++
+ uint8_t
+ user_timebase_type(void)
+ {
++	/* A scaled timebase is not the counter EL0 would read: userspace takes it through the mach_absolute_time trap. */
++	if (ml_timebase_scale_num != ml_timebase_scale_den) {
++		return USER_TIMEBASE_NONE;
++	}
+ #if HAS_ACNTVCT
+ 	return USER_TIMEBASE_NOSPEC_APPLE;
+ #elif HAS_APPLE_GENERIC_TIMER
+@@ -2482,6 +2488,30 @@ ml_interrupt_prewarm(__unused uint64_t deadline)
+ #define KERNEL_CNTKCTL_EL1   "CNTKCTL_EL1"
+ #endif
+ 
++/*
++ * SWEET (after UniXNU droidvm-timebase-24mhz, BSD-2-Clause-Patent): the timebase is the architected counter scaled by num/den (pe_identify_machine.c, sweettimebase): 24 MHz over a
++ * 19.2 MHz counter is 5/4. Every kernel read of the counter goes through timebase_from_counter, a decrementer value is converted
++ * back to counter ticks, and userspace takes the timebase through the mach_absolute_time trap (user_timebase_type).
++ */
++uint32_t ml_timebase_scale_num = 1, ml_timebase_scale_den = 1;
++
++static inline bool
++timebase_scaled(void)
++{
++	return ml_timebase_scale_num != ml_timebase_scale_den;
++}
++
++static inline uint64_t
++timebase_from_counter(uint64_t counter)
++{
++	const uint64_t num = ml_timebase_scale_num, den = ml_timebase_scale_den;
++
++	if (__probable(num == den)) {
++		return counter;
++	}
++	return counter / den * num + counter % den * num / den;
++}
++
+ /*
+  * Assumes fiq, irq disabled.
+  */
+@@ -2489,14 +2519,23 @@ void
+ ml_set_decrementer(uint32_t dec_value)
+ {
+ 	cpu_data_t      *cdp = getCpuDatap();
++	uint64_t        counter_value = dec_value;
+ 
+ 	assert(ml_get_interrupts_enabled() == FALSE);
+ 	cdp->cpu_decrementer = dec_value;
+ 
++	if (timebase_scaled()) {
++		/* Counter ticks, rounded up: the timer fires at the deadline or just after it, never before. */
++		counter_value = (counter_value * ml_timebase_scale_den + ml_timebase_scale_num - 1) / ml_timebase_scale_num;
++		if (counter_value > 0x7fffffff) {
++			counter_value = 0x7fffffff;
++		}
++	}
++
+ 	if (cdp->cpu_set_decrementer_func) {
+-		cdp->cpu_set_decrementer_func(dec_value);
++		cdp->cpu_set_decrementer_func((uint32_t)counter_value);
+ 	} else {
+-		__builtin_arm_wsr64(KERNEL_CNTV_TVAL_EL0, (uint64_t)dec_value);
++		__builtin_arm_wsr64(KERNEL_CNTV_TVAL_EL0, counter_value);
+ 	}
+ }
+ 
+@@ -2507,7 +2546,7 @@ ml_set_decrementer(uint32_t dec_value)
+ static inline uint64_t
+ speculative_timebase(void)
+ {
+-	return __builtin_arm_rsr64(KERNEL_CNTVCT_EL0);
++	return timebase_from_counter(__builtin_arm_rsr64(KERNEL_CNTVCT_EL0));
+ }
+ 
+ /**
+@@ -2519,7 +2558,7 @@ static inline uint64_t
+ nonspeculative_timebase(void)
+ {
+ #if   __ARM_ARCH_8_6__
+-	return __builtin_arm_rsr64(KERNEL_CNTVCTSS_EL0);
++	return timebase_from_counter(__builtin_arm_rsr64(KERNEL_CNTVCTSS_EL0));
+ #else
+ 	// ISB required by ARMV7C.b section B8.1.2 & ARMv8 section D6.1.2
+ 	// "Reads of CNT[PV]CT[_EL0] can occur speculatively and out of order relative
+@@ -2636,6 +2675,11 @@ ml_get_decrementer(void)
+ 		assert(wide_val == (uint64_t)dec);
+ 	}
+ 
++	/* Back in timebase ticks; a timer already past (TVAL negative) stays as read. */
++	if (timebase_scaled() && (int32_t)dec > 0) {
++		const uint64_t ticks = timebase_from_counter(dec);
++		dec = ticks > 0x7fffffff ? 0x7fffffff : (uint32_t)ticks;
++	}
+ 	return dec;
+ }
+ 
+@@ -2723,7 +2767,8 @@ _enable_timebase_event_stream(uint32_t bit_index)
+ 	 * If the SOC supports it (and it isn't broken), enable
+ 	 * EL0 access to the timebase registers.
+ 	 */
+-	if (user_timebase_type() != USER_TIMEBASE_NONE) {
++	if (user_timebase_type() != USER_TIMEBASE_NONE || timebase_scaled()) {
++		/* Scaled: EL0 keeps the counter (code that reads CNTVCT_EL0 itself sees it unscaled, rather than faulting). */
+ 		cntkctl |= (CNTKCTL_EL1_PL0PCTEN | CNTKCTL_EL1_PL0VCTEN);
+ 	}
+ 
+diff --git a/pexpert/arm/pe_identify_machine.c b/pexpert/arm/pe_identify_machine.c
+index 937ce42..c23265c 100644
+--- a/pexpert/arm/pe_identify_machine.c
++++ b/pexpert/arm/pe_identify_machine.c
+@@ -31,6 +31,39 @@ static uint32_t pe_arm_init_timer(void *args);
+  *
+  * Sets up platform parameters. Returns:    nothing
+  */
++/*
++ * SWEET (after UniXNU droidvm-timebase-24mhz, BSD-2-Clause-Patent): the timebase iOS userspace is built for, sweettimebase (24 MHz, every Apple arm64 SoC's), over an
++ * architected counter that runs at the host's rate (19.2 MHz on Qualcomm SoCs). iOS userspace assumes Apple's rate:
++ * libswift_Concurrency (swift_dispatchEnqueueWithDeadline) converts a ContinuousClock or SuspendingClock deadline to mach ticks as
++ * ns * 3 / 125, so on a 19.2 MHz counter every Task.sleep, debounce and timeout waited until 1.25 times the counter's value, a
++ * quarter of the host's uptime later (Settings' sidebar never took an update: its channel is debounced). The kernel scales every
++ * counter read by target/hardware (machine_routines.c), converts decrementer values back, and reports the target frequency here.
++ */
++extern uint32_t ml_timebase_scale_num, ml_timebase_scale_den;
++static void
++sweet_virtual_timebase(void)
++{
++	uint32_t target = 0;
++	const uint64_t hardware = gPEClockFrequencyInfo.timebase_frequency_hz;
++
++	if (!PE_parse_boot_argn("sweettimebase", &target, sizeof(target)) || target == 0 || hardware == 0 || target == hardware) {
++		return;
++	}
++	uint64_t a = target, b = hardware;
++	while (b != 0) {
++		const uint64_t r = a % b;
++		a = b;
++		b = r;
++	}
++	/* The scaled read (machine_routines.c) multiplies a remainder below den by num: both stay small. */
++	if (target / a > 0xffff || hardware / a > 0xffff) {
++		return;
++	}
++	ml_timebase_scale_num = (uint32_t)(target / a);
++	ml_timebase_scale_den = (uint32_t)(hardware / a);
++	gPEClockFrequencyInfo.timebase_frequency_hz = target;
++}
++
+ void
+ pe_identify_machine(boot_args * bootArgs)
+ {
+@@ -79,6 +112,7 @@ pe_identify_machine(boot_args * bootArgs)
+ 				gPEClockFrequencyInfo.timebase_frequency_hz = *(uint32_t const *)value;
+ 			}
+ 		}
++		sweet_virtual_timebase();
+ 		gPEClockFrequencyInfo.dec_clock_rate_hz = gPEClockFrequencyInfo.timebase_frequency_hz;
+ 
+ 		/* Find the bus frequency next. */
+-- 
+2.43.0
+

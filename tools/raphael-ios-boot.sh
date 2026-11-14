@@ -53,6 +53,9 @@ else
 	echo "RTC: no work/rtc-offset (python3 tools/raphael-rtc.py PHONE_IP once): the phone's clock will be ahead"
 fi
 CMDLINE+=" sweetfb_noconsole=1 flamereboot=0 sweetrtcoff=$RTCOFF"
+# TIMEBASE24=1 (default): mach_absolute_time runs at 24 MHz as on Apple's SoCs (xnu 0183). iOS assumes it:
+# Swift Task.sleep/debounce deadlines (ns * 3 / 125), CoreAudio's host clock. TIMEBASE24=0: the raw 19.2 MHz counter.
+[ "${TIMEBASE24:-1}" = 1 ] && CMDLINE+=" sweettimebase=24000000"
 if [[ "${USB:-1}" == 0 ]]; then CMDLINE+=" sweetusb=0"; else CMDLINE+=" sweetusb=2 sweetusbframes=0"; fi
 # WIFI=1: Wi-Fi bridge on (sweetwifid=1) and this board's carve-outs for wland, from raphael's DT
 # (tools/raphael-wifi-facts.py): modem_region 0x8e000000+0x9600000, pil_wlan_fw_region (MSA)

@@ -5,6 +5,17 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 04:40 MSK: 24 MHz timebase for iOS (0183); audio clock verified
+- adspd13.log (0182 + HotAudio): `ticks/frame CA 400.000 ours 400.000`, `hostclock 2/1`; a ringtone ran at 48.0k fps with no
+  underruns (200-224 s). 85-160 s (many short sounds) still 34-43k fps with underruns: the audio server is late, not the clock
+  (guess: CPU contention). User: sound works.
+- xnu 0183 (from UniXNU droidvm-timebase-24mhz, BSD-2-Clause-Patent): boot-arg sweettimebase=24000000 (raphael-ios-boot.sh
+  default, TIMEBASE24=0 drops it). Counter reads scaled 5/4, decrementer converted back, 24 MHz reported, userspace through the
+  mach_absolute_time trap. Why: libswift_Concurrency converts Task.sleep/debounce/timeout deadlines as ns*3/125 (24 MHz), so on
+  19.2 MHz every Swift deadline fired a quarter of the uptime late (DroidVM: Settings sidebar never updated). With it 0182 answers
+  "already" (2). Untested on the phone.
+- build.log: nanoregistryd no longer stripped (3 stripped: fairplayd.H2, SepUpdateTimer, prngseedd). jetsam: 0 limits raised.
+
 ### raphael, 2026-11-14 04:10 MSK: CoreAudio's host clock constant set by the kernel (0182)
 - Prior art: UniXNU-sheng dea464e "fix(audio): give CoreAudio this board's host clock frequency" (BSD-2-Clause-Patent):
   CoreAudio reads one double 24000000.0 (in the shared cache, loaded by AudioGetHostClockFrequency's adrp + ldr d0);

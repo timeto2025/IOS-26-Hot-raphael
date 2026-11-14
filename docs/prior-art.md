@@ -39,3 +39,16 @@
 
 ## Accessibility
 - oosexgang/hackios-xnu-kernel a5b8df0: AccessibilityBundles must be in the root, or the accessibility tree is empty.
+
+## General (second pass, all fix commits)
+- UniXNU/UniXNU-droidvm 5edbbfc: 24 MHz timebase for userspace (Swift deadlines ns*3/125) -> our xnu 0183.
+- akshaynexus/iOSPlus10 (iOS 26): jetsam floors for daemons iOS 26 kills at their limits (iconservicesagent inactive 200 MB,
+  lsd, usernotificationsd 32, dasd 48, donotdisturbd 24, localizationswitcherd 24, extensionkitservice 24, aonsensed 16);
+  33 daemons stopped (no hardware/clients); /chosen MAC addresses fix a LaunchServices/installd stall; FBLaunchWatchdogScale;
+  Settings > Wi-Fi hang = wifid waiting for configd's InterfaceNamer; Camera hang = mediaserverd capture servers;
+  docs/laurel_sprout/ios26-gpu-lag.md (fence-wait busy loop from mixed clocks, RenderBox specializedName).
+- UniXNU umi: 0248 UI/CoreAnimation threads on big cores (we have AMP E/P from 0151), 0232 idle ASM pause + 160 ms start
+  cushion (no pops), 0239 GPU fence interrupts, 0249-0251 per-client GPU memory and caps, CommCenter crash loop = CPU
+  (AppleBaseband stub; idle 65-120 % -> 7-9 %), ad daemons out.
+- UniXNU-sheng: keep WFE idle (WFI left cores asleep); drop the LaunchServices store each boot on iPadOS 27.
+- ry-diffusion/Bergamota: respawn loops and ReportCrash (150 % CPU) were the CPU thieves; vmd spins without a baseband.
