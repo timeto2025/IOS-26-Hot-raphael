@@ -41,7 +41,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: work/m2v-bridge/ios/libnative_metal_bridge.a
-          key: m2v-lib-720ef1ce-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
+          key: m2v-lib-555b13d5-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
 
       - name: Cache metal2vulkan Cargo dependencies
         if: steps.cache-m2v-lib.outputs.cache-hit != 'true'
@@ -53,10 +53,10 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             work/m2v-bridge/target
-          key: m2v-cargo-720ef1ce-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
+          key: m2v-cargo-555b13d5-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
           restore-keys: |
-            m2v-cargo-720ef1ce-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/patches/**', 'tools/build-m2v-bridge.sh') }}
-            m2v-cargo-720ef1ce-${{ runner.os }}-
+            m2v-cargo-555b13d5-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/patches/**', 'tools/build-m2v-bridge.sh') }}
+            m2v-cargo-555b13d5-${{ runner.os }}-
 
       - name: Cache SSH shell tools (dash, dropbearmulti, toybox)
         id: cache-shell
@@ -154,7 +154,7 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal --target aarch64-apple-ios
           git init -q work/metal2vulkan
-          git -C work/metal2vulkan fetch --depth 1 https://github.com/steelbrain/metal2vulkan.git 720ef1ce9ae2a2068999a8675717418b9416283e
+          git -C work/metal2vulkan fetch --depth 1 https://github.com/steelbrain/metal2vulkan.git 555b13d57e09bff70996a88cff64f1275256d5cf
           git -C work/metal2vulkan checkout -q FETCH_HEAD
           for p in phone/metal2/bridge/patches/*.patch; do
             git -C work/metal2vulkan apply "$PWD/$p"
