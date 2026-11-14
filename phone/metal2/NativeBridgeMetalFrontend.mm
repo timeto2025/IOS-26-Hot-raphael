@@ -5142,7 +5142,12 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
    {"NBDepthStencil","MTLDepthStencilState"},{"NBEvent","MTLEvent"},{"NBSharedEvent","MTLSharedEvent"},{"NBFence","MTLFence"},
    {"NBQueue","MTLCommandQueue"},{"NBCommandBuffer","MTLCommandBuffer"},{"NBEncoder","MTLCommandEncoder"},
    {"NBComputeEncoder","MTLComputeCommandEncoder"},{"NBRenderEncoder","MTLRenderCommandEncoder"},{"NBBlitEncoder","MTLBlitCommandEncoder"},
-   {"NBHeap","MTLHeap"},{"NBBinaryArchive","MTLBinaryArchive"}};
+   {"NBHeap","MTLHeap"},{"NBBinaryArchive","MTLBinaryArchive"},
+   // iOS 26 (from the legacy HotMetal2 frontend): Metal checks textures against its private implementation protocol and NSLogs
+   // "texture is not a MTLTextureImplementation." on every miss (25,690 lines in two minutes from backboardd on raphael).
+   {"NBTexture","MTLTextureImplementation"},{"NBTexture","MTLResource"},{"NBTexture","MTLAllocation"},
+   {"NBBuffer","MTLResource"},{"NBBuffer","MTLAllocation"},{"NBHeap","MTLAllocation"},
+   {"NBResourceGroup","MTLResourceGroupSPI"}};
   for(const auto &c:conformances){Class k=objc_getClass(c[0]);Protocol *pr=objc_getProtocol(c[1]);if(k&&pr)class_addProtocol(k,pr);}}
  objc_registerClassPair(cls);
  gDeviceObject=[cls new];
