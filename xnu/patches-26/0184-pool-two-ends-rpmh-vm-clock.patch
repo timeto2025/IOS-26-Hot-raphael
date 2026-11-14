@@ -1,0 +1,241 @@
+From 635dbf9999f5fe8c1d3461a3e45b819324adacfb Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 12:47:32 +0300
+Subject: [PATCH] sweet: GPU pool from two ends, RPMH false timeout, memory
+ line, clock floor
+
+From raphael's logs of 2026-11-14 12:37 (AdrenoMetal HotMetal2, 0183):
+- GPU pool: 628 refusals of 68 MB in 75 s with 280 MB free (first fit put small short-lived buffers in the holes
+  large blocks left). Buffers >= 8 MB now come from the top of the highest run, the rest from the bottom of the
+  lowest. The refusal line says the largest free run, at most once a second.
+- RPMH: a vote whose completion came before the first status read (preempted after the trigger) timed out with
+  the request done and poisoned the TCS for the boot (every later vote EIO). Status is read before the trigger;
+  idle and complete on 2000 reads in a row is taken as done.
+- SWEET VM: free/active/wired/compressor every 10 s while the screen is on.
+- sweettime=<build time>: the clock does not start before the image was built (RTC reset by a flat battery).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/dev/sweet_cpufreq.c                  | 37 +++++++++++++++++++++
+ bsd/dev/sweet_gpu.c                      | 42 +++++++++++++++++++++---
+ bsd/dev/sweet_rpmh.c                     | 26 ++++++++++++++-
+ iokit/Kernel/arm/SweetPlatformExpert.cpp | 20 ++++++++++-
+ 4 files changed, 118 insertions(+), 7 deletions(-)
+
+diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
+index b87a0de..150bd37 100644
+--- a/bsd/dev/sweet_cpufreq.c
++++ b/bsd/dev/sweet_cpufreq.c
+@@ -19,6 +19,10 @@
+ #include <kern/clock.h>
+ #include <kern/locks.h>
+ #include <kern/thread_call.h>
++#include <kern/host.h>
++#include <mach/mach_host.h>
++#include <mach/host_info.h>
++#include <mach/vm_statistics.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <sweet_diag.h>
+@@ -136,9 +140,42 @@ sweet_cpufreq_note_swap(void)
+ 	}
+ }
+ 
++/*
++ * Memory in the log, every 10 s while the screen is on: nothing else in the kernel log says how full RAM is
++ * (raphael: "Failed to open swap file 2" 175 s after boot was the only sign of pressure). Pages are 16 KB.
++ */
++static void
++osm_vm_line(void)
++{
++	static uint64_t last_comp, last_decomp;
++	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
++	vm_statistics64_data_t v;
++	if (host_statistics64(host_self(), HOST_VM_INFO64, (host_info64_t)&v, &count) != KERN_SUCCESS) {
++		return;
++	}
++#define OSM_MB(pages) ((unsigned long long)(pages) >> 6)
++	printf("SWEET VM: free %llu MB (+%llu speculative), active %llu, inactive %llu, wired %llu, file %llu, anonymous %llu; "
++	    "compressor holds %llu MB as %llu MB; 10s: %llu pages compressed, %llu decompressed, swap %llu in %llu out\n",
++	    OSM_MB(v.free_count), OSM_MB(v.speculative_count), OSM_MB(v.active_count), OSM_MB(v.inactive_count),
++	    OSM_MB(v.wire_count), OSM_MB(v.external_page_count), OSM_MB(v.internal_page_count),
++	    OSM_MB(v.total_uncompressed_pages_in_compressor), OSM_MB(v.compressor_page_count),
++	    (unsigned long long)(v.compressions - last_comp), (unsigned long long)(v.decompressions - last_decomp),
++	    (unsigned long long)v.swapins, (unsigned long long)v.swapouts);
++#undef OSM_MB
++	last_comp = v.compressions;
++	last_decomp = v.decompressions;
++}
++
+ static void
+ osm_gov_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+ {
++	static unsigned vm_ticks;
++	if (++vm_ticks >= 10000u / OSM_GOV_TICK_MS) {
++		vm_ticks = 0;
++		if (!sweet_fb_is_blanked()) {
++			osm_vm_line();
++		}
++	}
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t boot_ns = 0, touch_ns = UINT64_MAX;
+ 	if (now >= osm_boot_abs) {
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 705076d..804b5e4 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -396,6 +396,8 @@ gpu_stats_locked(void)
+ 	gstat_last_abs = now;
+ 	gstat_last_n = gstat_n;
+ 	gstat_last_missed = gstat_missed;
++	/* gstat_busy and gstat_longest are CP_ALWAYS_ON stamps: the GPU's own 19.2 MHz counter, not mach_absolute_time
++	 * (which 0183 scales to 24 MHz), so 19200 a millisecond stays right. */
+ 	gstat_last_busy_ms = gstat_busy / 19200ULL;
+ 	gstat_last_pct = (ns >= 1000000ULL) ? (uint32_t)(gstat_busy * 100ULL / 19200ULL / (ns / 1000000ULL)) : 0;
+ 	gstat_last_longest_us = gstat_longest * 10ULL / 192ULL;
+@@ -1293,6 +1295,7 @@ sweet_gpu_submit_user(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms, ui
+  */
+ #define GPOOL_UNIT      0x4000ULL
+ #define GPOOL_FREE_MAX  4096
++#define GPOOL_BIG       0x800000ULL     /* from the top of the pool (sweet_gpu_pool_try_alloc) */
+ static struct { uint64_t pa, size; } gpool_ranges[] = {
+ #if SWEET_BOARD_RAPHAEL
+ 	/*
+@@ -1364,10 +1367,23 @@ sweet_gpu_pool_try_alloc(uint64_t bytes, uint64_t *pa)
+ 		}
+ 		gpool_ready = true;
+ 	}
+-	for (uint32_t i = 0; i < gpool_nfree; i++) {
++	/*
++	 * Two ends: buffers of 8 MB and more (the Metal runtime's 16-68 MB memory blocks, drawables) come from
++	 * the top of the highest run that fits, everything else from the bottom of the lowest. With one first
++	 * fit for all, the many small short-lived buffers (command streams) landed in the holes large blocks
++	 * left, and no run of 68 MB remained with 280 MB free (raphael: 628 refusals in 75 s, each after
++	 * waiting for retired buffers on the render thread).
++	 */
++	bool big = size >= GPOOL_BIG;
++	for (uint32_t k = 0; k < gpool_nfree; k++) {
++		uint32_t i = big ? gpool_nfree - 1 - k : k;
+ 		if (gpool_free[i].size >= size) {
+-			*pa = gpool_free[i].pa;
+-			gpool_free[i].pa += size;
++			if (big) {
++				*pa = gpool_free[i].pa + gpool_free[i].size - size;
++			} else {
++				*pa = gpool_free[i].pa;
++				gpool_free[i].pa += size;
++			}
+ 			gpool_free[i].size -= size;
+ 			if (gpool_free[i].size == 0) {
+ 				memmove(&gpool_free[i], &gpool_free[i + 1], (gpool_nfree - i - 1) * sizeof(gpool_free[0]));
+@@ -1396,11 +1412,27 @@ sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa)
+ 		return 0;
+ 	}
+ 	uint64_t size = (bytes + GPOOL_UNIT - 1) & ~(GPOOL_UNIT - 1);
++	static uint64_t last_log;
+ 	lck_mtx_lock(&sweet_gpool_lock);
+ 	gpool_failures++;
+-	uint64_t used = gpool_used;
++	uint64_t used = gpool_used, failures = gpool_failures, largest = 0, runs = gpool_nfree;
++	for (uint32_t i = 0; i < gpool_nfree; i++) {
++		if (gpool_free[i].size > largest) {
++			largest = gpool_free[i].size;
++		}
++	}
++	/* at most one line a second: 110 a second went to the log */
++	uint64_t now = mach_absolute_time(), age_ns = 0;
++	absolutetime_to_nanoseconds(now - last_log, &age_ns);
++	bool say = last_log == 0 || age_ns >= NSEC_PER_SEC;
++	if (say) {
++		last_log = now;
++	}
+ 	lck_mtx_unlock(&sweet_gpool_lock);
+-	a6_log("pool: no %llu bytes free (%llu MB in use)\n", size, used >> 20);
++	if (say) {
++		a6_log("pool: no %llu bytes free (%llu MB in use, largest free run %llu MB of %llu runs, refusal %llu)\n",
++		    size, used >> 20, largest >> 20, runs, failures);
++	}
+ 	return -1;
+ }
+ 
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 85b585b..5c82767 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -297,9 +297,24 @@ rh_send_cmds(uint32_t address, unsigned n, const uint32_t *offsets, const uint32
+ 	    !rh_sync(b + RH_CONTROL, 0) || !rh_sync(b + RH_CONTROL, RH_AMC_EN)) {
+ 		return EIO;
+ 	}
++	/*
++	 * This TCS's interrupt is masked, so completion is read from CMD_STATUS, and a status left by the
++	 * slot's last use must not pass for this request's. If the status is already clear before the
++	 * trigger, any completion seen after it is this request's. If it is not, the busy state has to be
++	 * seen first; a caller preempted between the trigger and the first read never sees it (the request
++	 * takes microseconds) and timed out with the request done (raphael: cmd-status 0x10101, the same as
++	 * every good vote, then every later vote of the boot refused). So idle and complete on 2000 reads in
++	 * a row after the trigger is taken as done.
++	 */
++	bool stale = false;
++	for (unsigned c = 0; c < n; ++c) {
++		uint32_t pre = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
++		stale |= pre == 0xffffffffu || (pre & (RH_ISSUED | RH_COMPLETE)) != 0;
++	}
+ 	rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
+ 	uint32_t irq = 0, idle = 0, status[4] = {0, 0, 0, 0};
+-	bool done = false, progress = false;
++	bool done = false, progress = !stale;
++	unsigned settled = 0;
+ 	for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
+ 		irq = rh_read(rh_tcs, RH_IRQ_STATUS);
+ 		idle = rh_read(rh_tcs, b + RH_STATUS);
+@@ -316,6 +331,15 @@ rh_send_cmds(uint32_t address, unsigned n, const uint32_t *offsets, const uint32
+ 			done = true;
+ 			break;
+ 		}
++		if (idle && idle != 0xffffffffu && complete) {
++			if (++settled >= 2000) {
++				printf("SWEET RPMH: TCS%u complete with no busy state seen (preempted after the trigger): taken as done\n", t);
++				done = true;
++				break;
++			}
++		} else {
++			settled = 0;
++		}
+ 		delay(1);
+ 	}
+ 	if (verbose || !done) {
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 72e76d7..2d3a49e 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -136,7 +136,25 @@ SweetPlatformExpert::getGMTTimeOfDay(void)
+ 		return 0;
+ 	}
+ 	(void)PE_parse_boot_argn("sweetrtcoff", &off, sizeof(off));
+-	return (long)((uint64_t)rtc + off);
++	uint64_t now = (uint64_t)rtc + off, built = 0;
++	/*
++	 * sweettime=<Unix time the image was built>: the RTC restarts from 0 when the battery runs flat (raphael:
++	 * 2986 mV, then "PM8150 RTC 1452 s"), and the saved offset then gives a date months back (every TLS
++	 * certificate "not yet valid"). No time before the image's own build is right: start from the build time
++	 * plus the time since power-on instead.
++	 */
++	if (PE_parse_boot_argn("sweettime", &built, sizeof(built)) && now < built) {
++		uint64_t up_ns = 0;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &up_ns);
++		static bool said;
++		if (!said) {
++			said = true;
++			IOLog("SWEET RTC: RTC %u s + offset %llu = %llu is before the image's build time %llu (the RTC was reset): "
++			    "the clock starts from the build time\n", rtc, off, now, built);
++		}
++		now = built + up_ns / NSEC_PER_SEC;
++	}
++	return (long)now;
+ }
+ 
+ void
+-- 
+2.43.0
+

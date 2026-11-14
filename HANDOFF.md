@@ -5,6 +5,38 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 13:20 MSK: full log review (AdrenoMetal HotMetal2 on 0183), xnu 0184
+Logs: raphael-logs-20261114-123757 (klog, status, doctor, crashes, build.log; the daemons' own logs were missing: the
+script's ssh failed, now fetched over TCP 2223). First boot after darwin was re-synced from the clean image.
+- **Observed**
+  - GPU pool: 628 refusals of 71303168 bytes (68 MB, the Metal runtime's memory blocks) at 251-324 s with 988-1092 of
+    1268 MB in use: free memory in runs under 68 MB. Each refusal comes after waiting for retired buffers. Peaks:
+    backboardd 748 MB, SpringBoard 339 MB, iconservicesagent 276 MB, MobileNotes 133 MB, pool 1128 MB.
+  - Frames: 31 active 5 s windows, 35.9 fps average, 1 window at 60. backboardd GPU time 9.0 ms a submit on average
+    (CP_ALWAYS_ON stamps, right with the 24 MHz timebase), 46.7 ms at 188 s (GPU 99 % busy); 21 of 34 windows had a
+    submit over 16.6 ms. GPU busy mostly 20-60 %: frames are not only GPU-bound.
+  - "Failed to open swap file 2" at 175 s: ENOENT (no swap directory); the compressor wanted to swap 3 minutes in.
+    vm_page_bootstrap: 252209 free pages (3.85 GB). No memory figures in the log before 0184.
+  - Clock: "PM8150 RTC 1452 s", launchd dated 2026-01-04: the RTC was reset (battery 2986 mV / 3 % an hour before),
+    sweetrtcoff stale, timed did not correct it in 6 minutes on Wi-Fi.
+  - RPMH: cx.lvl vote from adspd "done=0 ... cmd-status=0x10101/0/0" after 7 s, then lcx/lmx/cx votes -> 5 (EIO). Same
+    status as every good vote. Also in klog-am (11:49), not in klog-0183.
+  - sweetgpufreq=6: "perf vote 675 MHz -> 0" (the SM8150-AC step; a plain SM8150's top OPP is 585 MHz). Not measured.
+  - Battery temperature 25.0 C in every status (not read). USB: "endpoint 0 setup failed" every boot.
+  - Bluetooth: bluetoothd on the UART at 98.8 s; own LE commands 0x200b/0x200c answered 0x0c 35 times, 0x2035 0x42 x3.
+  - mediaplaybackd SIGABRT once (175.9 s), relaunched. Wi-Fi: WPA2-PSK join in 126 ms; gets of PHY_MODE/RATE/MCS/NOISE/
+    POWERSAVE refused. No "texture is not a MTLTextureImplementation", no runtime panic, GPU recoveries 0.
+  - Home screen 73 s after display on (26 s -> 99 s): datamigrator/lsreg/installd, first boot of a fresh image.
+  - Root is HFS+ ("hfs: mounted iOSRoot"), not APFS.
+- **xnu 0184**: GPU pool from two ends (>= 8 MB from the top), throttled refusal line with the largest free run;
+  RPMH status read before the trigger + settled completion; "SWEET VM:" line every 10 s; sweettime= clock floor
+  (raphael-ios-boot.sh passes the build time). Untested.
+- **Guesses**: app hangs = pool refusals + waits; memory pressure adds stalls; 1125x2436 is heavy for Adreno 640.
+- **Open, by expected effect**: kernel ABI v2 (SetPriority, Note, 128 IBs, OwnedCoherent/MemoryPressure params) to
+  take UniXNU's Turnip after cd1b975 (BO cache trimming, memory pressure, memoryless textures); a 750x1624 @2x canvas
+  as an option (2.25x fewer pixels); measure the real GPU clock (RBBM perf counter); thermal sensors; swap directory;
+  SNTP in wland; Bluetooth LE scan refusals; USB ep0.
+
 ### raphael, 2026-11-14 12:25 MSK: HotMetal2 on AdrenoMetal (branch ci/adrenometal, userland run 43578686953)
 - phone/metal2 on branch ci/adrenometal: UniXNU AdrenoMetal frontend + bridge (metal2vulkan 555b13d5 + their 12 patches);
   old frontend in phone/metal2/legacy. Test without merging: raphael-ios-boot.sh METAL2_FROM=<ios-userland.tar.gz>.
