@@ -5,6 +5,39 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 13:40 MSK: xnu 0184+0185 and Turnip on kernel ABI v2 flashed; work moves to the owner's PC
+Logs: raphael-logs-20261114-131738 (3 min 24 s of uptime). Kernel: xnu run 43583330657 (0185). HotMetal2: userland run
+43583341137 on `ci/adrenometal` (Turnip from UniXNU d8210e0, `GPUABI=2`). The phone is a plain K20 Pro (SM8150, not -AC).
+- **xnu 0185** (with 0184, one build): Query answers ABI 2 (`sweetgpuabi=1` for a Turnip pinned at cd1b975; both submit
+  record sizes, 416 and 3104 bytes, are taken either way); submits of up to 128 IBs go to the ring in parts of 16 (only
+  the first part may answer busy); SetPriority (17) checked and accepted, nothing scheduled by it; Note (18) to the log,
+  4 a second; Query's MemoryPressure flag for a second after a pool refusal; `sweetgpufreq` default 5 (585 MHz);
+  apple80211 gets NOISE (17, -95 dBm fixed), PHY_MODE (14, from the band), POWERSAVE (5, off). RATE (8) and MCS (57)
+  still refused: the real values need the firmware's statistics.
+- **Boot script**: `GPUFREQ` (default 5), `GPUABI` (default 1; 2 with the ci/adrenometal userland).
+- **Observed on the phone**
+  - `SWEET RTC: ... the clock starts from the build time`; launchd dated 2026-11-14. "perf vote 585 MHz -> 0".
+  - Pool: fail=0 (was 628 refusals); after the restarts backboardd holds 327 MB (peak 433), pool 681 of 1268 MB.
+  - **GPU faults, new**: 61.091, 62.113, 63.499 s: "v2 fence wait: GPU hang or fault ... smmu fsr 2 far 120a338180
+    fsynr0 30003", each time ib1 000000120a234000 rem d9. recover restarted backboardd[60] at 62.3 s (it held 760 MB,
+    up from 520 MB in the 100 ms after the second fault). backboardd[285] then got "device refused ... device:
+    OutOfMemory(Device)" and aborted at 105 s; backboardd[317] runs. Not seen with Turnip cd1b975 (recoveries 0).
+    Not known: which process sent that IB, whether it happens on every boot.
+  - Frames after the restarts: 24-59 fps in 5 s windows; backboardd 4-7 ms a submit, GPU 25-76 % busy, longest 25 ms.
+  - `SWEET VM`: free 3007 MB at 18 s, 1174 at 38 s, 282 at 169 s; anonymous 1615 MB, file 1942 MB, wired 420 MB;
+    compressor 0, swap 0 in the whole log.
+  - analyticsd SIGSEGV x3 at 27-29 s (far 0). No RPMH false timeout in this boot (intermittent before, so unproven).
+  - The owner: "nothing noticeably better".
+- **Guess**: the new Turnip's cache of freed BOs / its own retirement frees a buffer a recorded IB still names; the
+  kernel unmaps in BoFree at once. Fallback without a kernel build: `GPUABI=1` + `~/Downloads/ul-am/ios-userland.tar.gz`.
+- **Not done, said to the owner**: real GPU clock measurement (moot at 585 MHz); a smaller canvas (needs the userland's
+  device properties, not one boot-arg; `sweetfb_native=1` exists, 8 % fewer pixels).
+- **New tools for a session on another machine**: `tools/clone-mirrors.sh` (the 76 surveyed repositories of
+  `docs/prior-art-repos.txt` as bare mirrors, ~2 GB), `tools/xnu-tree.sh` (xnu-12377.121.6 + dxb + patches-26 as a
+  local git tree for writing patches; 0134's firehose header is staged only by the macOS build), `CLAUDE.md` (rules).
+- **Next**: 1. the GPU fault at 61 s; 2. who takes the RAM, swap directory or not; 3. where a frame's time goes;
+  4. USB network, Bluetooth LE refusals, battery temperature, SNTP, Wi-Fi rate from the firmware.
+
 ### raphael, 2026-11-14 13:20 MSK: full log review (AdrenoMetal HotMetal2 on 0183), xnu 0184
 Logs: raphael-logs-20261114-123757 (klog, status, doctor, crashes, build.log; the daemons' own logs were missing: the
 script's ssh failed, now fetched over TCP 2223). First boot after darwin was re-synced from the clean image.
