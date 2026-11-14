@@ -5,6 +5,19 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-14 04:10 MSK: CoreAudio's host clock constant set by the kernel (0182)
+- Prior art: UniXNU-sheng dea464e "fix(audio): give CoreAudio this board's host clock frequency" (BSD-2-Clause-Patent):
+  CoreAudio reads one double 24000000.0 (in the shared cache, loaded by AudioGetHostClockFrequency's adrp + ldr d0);
+  their kernel rewrites it on the physical page. They also found SimpleIIR stuttered; Raw + stable + stamps from IO start worked.
+- xnu 0182: sysctl kern.sweet.hostclock (write: the constant's address in the caller; checks shared region, value 24e6,
+  managed physmap; writes 19200000.0). Read: low 32 = last result (1 set, 2 already, <0 refused step), high 32 = sets.
+  klog: "SWEET AUDIO: host clock constant at ...".
+- HotAudio: phone/audio/hot_hostclock.h finds the address and calls the sysctl at initialize and every IO start; with
+  the constant set it answers ClockIsStable=1 + Raw, otherwise 0 + 'mavg' (the untested 43533557557 change).
+- adspd: feed line ends with "hostclock last/sets"; if the kernel never saw a set (audio server sandbox refused the
+  sysctl), adspd dlopens CoreAudio and sets it itself (3 tries, logs the instruction words and the constant).
+- Open: device test; expect CA ticks/frame 400.000 and hal ~48000 fps.
+
 ### raphael, 2026-11-14 03:25 MSK: CoreAudio assumes a 24 MHz host clock
 - adspd feed with HotAudio's cycle info: CoreAudio's mDeviceHostTicksPerFrame = 500.000 (24 MHz / 48 kHz) at every
   re-anchor, drifting to 406.25/425 before the next; our timestamps (mach_timebase_info, 19.2 MHz) say 400.000.

@@ -20,6 +20,7 @@
 #include <sys/sysctl.h>
 
 #include "adspd.h"
+#include "../audio/hot_hostclock.h"
 
 /* ---- APR v2 framing & service IDs (techpack/audio/include/ipc/apr.h) ---- */
 #define APR_HDR_SIZE                            20u
@@ -1588,9 +1589,21 @@ adsp_q6_tick(void)
 			if (g_status.amp_enabled && spk_amp_status(amp, sizeof(amp)) != 0) {
 				amp[0] = 0;
 			}
+			/* CoreAudio's host clock constant: the HAL sets it (inside the audio server); if the
+			 * kernel never saw a set (the server's sandbox refused the sysctl), set it from here. */
+			static unsigned hc_tries;
+			int64_t hc = hot_hostclock_status();
+			if (hc > -1000 && (hc >> 32) == 0 && (int32_t)hc != 2 && hc_tries < 3) {
+				char diag[160];
+				hc_tries++;
+				int r = hot_hostclock_fix(1, diag, sizeof(diag));
+				hc = hot_hostclock_status();
+				adsp_log("host clock: fix from adspd %d, kernel %d (%d set); %s", r, (int)(int32_t)hc,
+				    (int)(hc >> 32), diag);
+			}
 			adsp_log("feed %llums%s: hal +%u (%u fps) dsp +%u periods (%u fps); full %u silence %u waits %u "
 			    "resync %u; backlog %u..%u queued>=%u state %d underruns %llu; hal gaps %u (last %d) cycle %u/%u "
-			    "ticks/frame CA %u.%03u ours %u.%03u lead %d; %s",
+			    "ticks/frame CA %u.%03u ours %u.%03u lead %d; hostclock %d/%d; %s",
 			    (unsigned long long)dt, flush_partial ? " (end)" : "", last_w - w0,
 			    (unsigned)((uint64_t)(last_w - w0) * 1000ULL / dt),
 			    (uint32_t)g_status.periods_written - pw0,
@@ -1599,7 +1612,7 @@ adsp_q6_tick(void)
 			    feed_min_queued, feed_state, (unsigned long long)g_status.underruns,
 			    g_shm->reserved[0], (int)g_shm->reserved[1], g_shm->reserved[2], g_shm->reserved[3],
 			    g_shm->reserved[4] / 1000, g_shm->reserved[4] % 1000, g_shm->reserved[5] / 1000,
-			    g_shm->reserved[5] % 1000, (int)g_shm->reserved[6], amp);
+			    g_shm->reserved[5] % 1000, (int)g_shm->reserved[6], (int)(int32_t)hc, (int)(hc >> 32), amp);
 			t0 = 0;
 		}
 		if (t0 == 0 || !hal_active) {

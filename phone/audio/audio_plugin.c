@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach_time.h>
+#include "hot_hostclock.h"
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -232,6 +233,7 @@ static struct hot_audio_shm *shm_ptr;
 static UInt64 shm_last_try;
 static UInt64 retry_interval_ticks;
 static Float64 ticks_per_frame;
+static Boolean host_clock_fixed;  /* CoreAudio's 24 MHz constant now reads this board's timer frequency */
 static UInt64 written, refused;
 static Boolean inactive[OBJECT_LAST + 1];
 static Float32 volume = 1.0f;
@@ -255,6 +257,17 @@ say(const char *format, ...)
 		n = (int)sizeof(line) - 1;
 	}
 	(void)write(2, line, (size_t)n);
+}
+
+/* Set CoreAudio's host clock constant (hot_hostclock.h); again at each IO start: the page may have been read back from disk. */
+static void
+host_clock_fix(void)
+{
+	char diag[160];
+	int r = hot_hostclock_fix(0, diag, sizeof(diag));
+	int64_t st = hot_hostclock_status();
+	host_clock_fixed = st > 0 && ((int32_t)st == 1 || (int32_t)st == 2);
+	say("hot: audio: host clock fix %d, kernel status %d (%d set), %s\n", r, (int)(int32_t)st, (int)(st >> 32), diag);
 }
 
 static Float32
@@ -481,6 +494,7 @@ initialize(__unused AudioServerPlugInDriverRef drv, AudioServerPlugInHostRef the
 	mach_timebase_info(&timebase);
 	ticks_per_frame = 1e9 * timebase.denom / timebase.numer / HAKIOS_AUDIO_RATE;
 	retry_interval_ticks = (UInt64)(0.25e9 * timebase.denom / timebase.numer);
+	host_clock_fix();
 	sink = open(HAKIOS_AUDIO_DEVICE, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
 	sink_open_tries = 1;
 	(void)ensure_shm();
@@ -774,15 +788,16 @@ property(AudioObjectID object, const AudioObjectPropertyAddress *address, UInt32
 		/*
 		 * iOS 26's CoreAudio takes 500 host ticks per frame at 48 kHz (a 24 MHz host clock, as on Apple's SoCs)
 		 * while mach_absolute_time runs at 19.2 MHz here (400 ticks per frame, what these timestamps say):
-		 * with a "stable" clock and the raw algorithm it re-anchored every ~0.4 s ("Sample time is consecutive,
-		 * host time is not consecutive"), rate scalar 0.85/1.0, and skipped IO cycles (HAL 38-43k frames/s).
-		 * Not stable + the 12-point moving average: the host measures the rate from the timestamps instead.
+		 * it re-anchored every ~0.4 s ("Sample time is consecutive, host time is not consecutive"), rate
+		 * scalar 0.85, and skipped IO cycles (HAL 38-43k frames/s). With the constant set (host_clock_fix):
+		 * a stable clock and Raw, the exact time stamps (UniXNU-sheng: smoothing only delayed the server and
+		 * SimpleIIR stuttered). Without it: not stable + the 12-point moving average.
 		 */
 		case kAudioDevicePropertyClockIsStable:
-			WORD(0);
+			WORD(host_clock_fixed ? 1 : 0);
 			break;
 		case kAudioDevicePropertyClockAlgorithm:
-			WORD('mavg');
+			WORD(host_clock_fixed ? 'raww' : 'mavg');
 			break;
 		}
 	} else {
@@ -1088,6 +1103,7 @@ start_io(__unused AudioServerPlugInDriverRef drv, AudioObjectID object, __unused
 	}
 	pthread_mutex_lock(&lock);
 	if (d->running++ == 0) {
+		host_clock_fix();
 		d->anchor = mach_absolute_time();
 		d->periods = 0;
 		if (d->object == OBJECT_SPEAKER) {

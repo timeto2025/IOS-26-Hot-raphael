@@ -1,0 +1,169 @@
+From 661e2fbf51e96d8788bffee46189e0f0f6d732dd Mon Sep 17 00:00:00 2001
+From: raphael port <noreply@example.invalid>
+Date: Sat, 14 Nov 2026 03:44:54 +0300
+Subject: [PATCH] sweet AUDIO: kern.sweet.hostclock sets CoreAudio's 24 MHz
+ host clock constant to the 19.2 MHz timer
+
+CoreAudio reads one double constant (24000000.0, Apple's timer) for its IO
+clock; the SM8150 timer is 19.2 MHz, so the audio server expected 500 ticks
+per frame where the device gives 400 (re-anchoring, rate scalar 0.85,
+crackle). The constant is on a read-only shared-cache page: the caller gives
+its address, the kernel checks it and sets it on the physical page.
+Approach from UniXNU-sheng (BSD-2-Clause-Patent).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013rVZjnPGcWZK2wDok3aGPP
+---
+ bsd/conf/files            |   1 +
+ bsd/dev/sweet_hostclock.c | 127 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 128 insertions(+)
+ create mode 100644 bsd/dev/sweet_hostclock.c
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index d93ec54..9d13949 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -121,6 +121,7 @@ bsd/dev/sweet_cpufreq.c			standard
+ bsd/dev/sweet_poke.c			standard
+ bsd/dev/sweet_files.c			standard
+ bsd/dev/sweet_diag.c			standard
++bsd/dev/sweet_hostclock.c		standard
+ bsd/dev/sweet_pmem.c			standard
+ bsd/dev/sweet_a6xx.c			standard
+ bsd/dev/sweet_gpu.c			standard
+diff --git a/bsd/dev/sweet_hostclock.c b/bsd/dev/sweet_hostclock.c
+new file mode 100644
+index 0000000..3eab552
+--- /dev/null
++++ b/bsd/dev/sweet_hostclock.c
+@@ -0,0 +1,127 @@
++/*
++ * CoreAudio's host clock frequency on a 19.2 MHz timer.
++ *
++ * CoreAudio takes the host clock to be 24 MHz, the timer of Apple's chips:
++ * AudioGetHostClockFrequency and the audio server's IO clock and IO thread
++ * read one double constant in the dyld shared cache. This board's timer
++ * (mach_absolute_time) runs at 19.2 MHz, so the audio server expected 500
++ * host ticks per frame at 48 kHz where the device's time stamps give 400:
++ * it re-anchored every ~0.4 s, ran at a rate scalar of 0.85 and delivered
++ * 38-43k frames/s for 48k (crackle and stutter).
++ *
++ * The constant sits on a read-only shared-cache page, so a process cannot
++ * write it. sysctl kern.sweet.hostclock (write) takes its address in the
++ * caller (found from the adrp + ldr d0 at AudioGetHostClockFrequency) and
++ * sets the value on the physical page, for every process mapping the cache.
++ * Only an 8-byte double inside the shared region that reads 24000000.0 (or
++ * already the board's frequency) is written, and only with the board's
++ * frequency. Read: the last result (1 set, 2 already set, < 0 refused at
++ * that step), the count of pages set in the high 32 bits.
++ *
++ * The approach is that of UniXNU-sheng (BSD-2-Clause-Patent, UniXNU
++ * contributors): fix(audio): give CoreAudio this board's host clock
++ * frequency.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/proc.h>
++#include <sys/sysctl.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/task.h>
++#include <vm/pmap.h>
++#include <libkern/libkern.h>
++#include <os/atomic_private.h>
++
++SYSCTL_DECL(_kern_sweet);
++
++extern vm_map_address_t phystokv(uint64_t pa);
++extern uint64_t pmap_find_pa(pmap_t map, uint64_t va);
++extern boolean_t pmap_valid_address(uint64_t addr);
++
++#define HOSTCLOCK_APPLE         0x4176e36000000000ULL   /* 24000000.0 */
++#define HOSTCLOCK_REGION_LO     0x180000000ULL
++#define HOSTCLOCK_REGION_HI     0x400000000ULL
++
++static int64_t hostclock_last;
++static uint32_t hostclock_set;
++
++/* The timer frequency as an IEEE double, built from the integer (no FP in the kernel). */
++static uint64_t
++hostclock_bits(uint64_t *hz_out)
++{
++	mach_timebase_info_data_t tb;
++	clock_timebase_info(&tb);
++	uint64_t hz = 1000000000ULL * tb.denom / tb.numer;
++	unsigned top = 63 - (unsigned)__builtin_clzll(hz);
++	*hz_out = hz;
++	return (uint64_t)(1023 + top) << 52 | ((hz << (52 - top)) & ((1ULL << 52) - 1));
++}
++
++static int64_t
++hostclock_apply(uint64_t address)
++{
++	uint64_t seen = 0, hz = 0;
++	uint64_t bits = hostclock_bits(&hz);
++
++	if ((address & 7) || address < HOSTCLOCK_REGION_LO || address >= HOSTCLOCK_REGION_HI) {
++		return -1;
++	}
++	if (hz == 24000000ULL) {
++		return 2;       /* nothing to fix */
++	}
++	/* Read through the caller: faults the page in and checks it is the constant. */
++	if (copyin((user_addr_t)address, &seen, sizeof(seen)) != 0) {
++		return -2;
++	}
++	if (seen == bits) {
++		return 2;
++	}
++	if (seen != HOSTCLOCK_APPLE) {
++		return -3;
++	}
++	uint64_t pa = pmap_find_pa(get_task_pmap(current_task()), address);
++	if (pa == 0) {
++		return -4;
++	}
++	if (!pmap_valid_address(pa)) {
++		return -5;      /* outside the managed physmap: phystokv would panic */
++	}
++	volatile uint64_t *value = (volatile uint64_t *)phystokv(pa);
++	if (*value != HOSTCLOCK_APPLE) {
++		return -6;
++	}
++	*value = bits;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	uint32_t n = os_atomic_inc(&hostclock_set, relaxed);
++	if (n <= 8) {
++		proc_t p = current_proc();
++		printf("SWEET AUDIO: host clock constant at 0x%llx (pa 0x%llx) 24000000 -> %llu Hz, by %s[%d] (#%u)\n",
++		    address, (unsigned long long)pa, hz, p ? proc_best_name(p) : "?", p ? proc_pid(p) : -1, n);
++	}
++	return 1;
++}
++
++static int
++sysctl_sweet_hostclock SYSCTL_HANDLER_ARGS
++{
++	#pragma unused(oidp, arg1, arg2)
++	uint64_t address = 0;
++	int64_t v = (int64_t)((uint64_t)os_atomic_load(&hostclock_set, relaxed) << 32 |
++	    (uint32_t)os_atomic_load(&hostclock_last, relaxed));
++	int error = SYSCTL_OUT(req, &v, sizeof(v));
++	if (error || req->newptr == USER_ADDR_NULL) {
++		return error;
++	}
++	error = SYSCTL_IN(req, &address, sizeof(address));
++	if (error) {
++		return error;
++	}
++	int64_t r = hostclock_apply(address);
++	os_atomic_store(&hostclock_last, r, relaxed);
++	return r > 0 ? 0 : EINVAL;
++}
++SYSCTL_PROC(_kern_sweet, OID_AUTO, hostclock, CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
++    0, 0, sysctl_sweet_hostclock, "Q", "Set CoreAudio's 24 MHz host clock constant to this board's timer frequency");
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+-- 
+2.43.0
+
