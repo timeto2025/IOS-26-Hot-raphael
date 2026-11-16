@@ -26,6 +26,12 @@ Nothing from Apple's iOS IPSWs, Google's factory images, Oppo's firmware, or Qua
 - **dash** (Herbert Xu and others, `BSD-3-Clause`), **Dropbear** (Matt Johnston and others, `MIT`-style, see its `LICENSE`) and **toybox** (Rob Landley, `0BSD`): fetched and built by `.github/workflows/userland.yml`; their binaries are in `ios-userland.tar.gz`.
 - `shim/font.h`: glyphs of `cp850-8x16.psfu` from the Linux `kbd` console fonts, inherited from ios-sweet. The licence of that font file has not been verified.
 
+## raphael port additions
+
+- `tools/avbtool.py`: Android Verified Boot tool 1.3.0 (Copyright 2016 The Android Open Source Project, `MIT`, header in the file), the copy shipped with the HakiOS raphael package; not compared with AOSP byte for byte.
+- `tools/raphael-make-darwin.py`: written for this port; its way of carving `darwin` off the end of userdata (only userdata's end and one new entry, 2 MiB alignment, the APFS container type, both GPT copies checked) follows HakiOS's `tools/userdata-carve.py` (`MIT`, notice below).
+- `phone/metal2/` AdrenoMetal frontend (UniXNU/AdrenoMetal, `MIT`); `xnu/patches-26/0182` CoreAudio host clock after UniXNU-sheng (`BSD-2-Clause-Patent`); `0183` 24 MHz timebase after UniXNU-droidvm.
+
 ## Binaries
 
 - `HotMetal2.bundle` links the metal2vulkan translator and runtime statically. The bundle as a whole is distributed under `LGPL-3.0-or-later` (metal2vulkan's terms; `GPL-2.0-or-later` is its other option). Its complete source is this repository at the commit that built it, metal2vulkan at `720ef1ce9ae2a2068999a8675717418b9416283e` with `phone/metal2/bridge/patches/`, and Mesa with `phone/turnip/patches/`; `tools/build-m2v-bridge.sh` and `tools/build-turnip-ios.sh` rebuild and relink it.
@@ -34,7 +40,7 @@ Nothing from Apple's iOS IPSWs, Google's factory images, Oppo's firmware, or Qua
 
 ## Notices
 
-HackiOS user space (`userland/src/`), from which the four files named above are adapted:
+HackiOS user space and tools (`userland/src/`, `tools/`), from which the four files named above are adapted and `tools/raphael-make-darwin.py` takes its method:
 
 ```
 MIT License

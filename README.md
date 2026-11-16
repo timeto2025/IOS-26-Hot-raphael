@@ -45,9 +45,14 @@
 ## Что нужно
 
 - Телефон с разблокированным загрузчиком.
-- Раздел `darwin` не меньше 28 ГиБ для корня iOS, отрезанный от конца `userdata` (это стирает данные Android).
-  Создать его инструментами этого репозитория пока нельзя: своё средство для разметки ещё не написано, есть только
-  `tools/raphael-move-recovery.py`, который после этого переносит `recovery` в конец диска и увеличивает его до 128 МиБ.
+- Раздел `darwin` для корня iOS (не меньше 30 ГиБ), отрезанный от конца `userdata`: **это стирает данные Android.**
+  Делается из TWRP командой `tools/raphael-make-darwin.py ГИБ`: без `--apply` только показывает план, с `--apply`
+  сохраняет обе копии таблицы разделов в `~/gpt-backup/`, просит ввести `ERASE` и пишет новую таблицу с проверкой
+  чтением. Заодно `recovery` переносится в конец диска и растёт до 128 МиБ (нужно образу iOS). Затем
+  `adb reboot recovery` и `tools/raphael-make-darwin.py --format-data` (форматирует `userdata` заново). Откат:
+  `--restore ~/gpt-backup/darwin-…`. Расчёт проверен на копии таблицы (воспроизводит разметку, с которой работает
+  этот порт), на телефоне `--apply` ещё не запускался.
+  Если `darwin` уже есть, а `recovery` осталась на 64 МиБ: `tools/raphael-move-recovery.py`.
 - TWRP для raphael: любая сборка с `adb` под root, например официальная с [twrp.me](https://twrp.me/xiaomi/xiaomimi9tpro.html).
   Нужна для записи корня в `darwin`, переноса `recovery` и копирования прошивок; загружается через
   `fastboot boot <twrp>.img`, прошивать её не обязательно.
@@ -57,7 +62,7 @@
   приложенными DTB, непустая `recovery_dtbo` (без неё загрузчик не запустит образ из раздела `recovery`).
   Сборщик проверяет это и сообщает, если чего-то нет. Проверено на одной сборке TWRP; официальная TWRP и стоковый
   `recovery.img` на этом порте ещё не пробовались.
-- `avbtool.py` из AOSP (`platform/external/avb`): положите его в `downloads/avb/avbtool.py` или укажите `AVBTOOL=`.
+- `avbtool.py` из AOSP (MIT) лежит в `tools/avbtool.py` и подхватывается сам; другой можно указать через `AVBTOOL=`.
 - Linux (проверено на Arch): `python3`, `clang`, `lld`, `llvm`, `android-tools` (`fastboot`, `adb`), `gh`.
 - Свой IPSW iOS 26.5.2 (`23F84`) для iPhone 11 Pro и собранный из него корневой образ (см.
   [README-UPSTREAM.md](README-UPSTREAM.md), раздел про корневой образ).
@@ -105,7 +110,7 @@ cd ~/IOS-26-Hot-raphael && GPUABI=2 METAL2_FROM=<ios-userland.tar.gz из ci/adr
 | Путь | Что там |
 | --- | --- |
 | `xnu/patches-26/` | Патчи ядра по порядку; для raphael — с `0152` |
-| `tools/raphael-*` | Сборка образа, запись корня, прошивки, логи, часы, разметка `recovery` |
+| `tools/raphael-*` | Сборка образа, разметка (`raphael-make-darwin.py`), запись корня, прошивки, логи, часы |
 | `tools/xnu-tree.sh` | Локальное дерево ядра со всеми патчами (для новых патчей) |
 | `tools/clone-mirrors.sh` | Зеркала 76 похожих проектов ([docs/prior-art.md](docs/prior-art.md), [список](docs/prior-art-repos.txt)) |
 | `phone/` | Демоны и библиотеки iOS: `metal2`, `turnip`, `wifi`, `adsp`, `audio`, `bt`, `tools` |

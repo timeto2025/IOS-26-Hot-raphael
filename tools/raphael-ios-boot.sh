@@ -249,7 +249,7 @@ echo "Boot args: $CMDLINE"
 # 128 MiB recovery partition (tools/raphael-move-recovery.py); flash that one to recovery.
 # For recovery, STOCK_BOOT_IMG must carry a recovery_dtbo (it is kept; mkbootimg_raphael_probe.py warns if not).
 if [[ -z "${AVBTOOL:-}" ]]; then
-	for c in "$ROOT/downloads/avb/avbtool.py" "$HOME"/Downloads/avbtool.py; do
+	for c in "$ROOT/downloads/avb/avbtool.py" "$ROOT/tools/avbtool.py"; do
 		[[ -f "$c" ]] && { AVBTOOL=$c; break; }
 	done
 fi
