@@ -77,17 +77,33 @@
 Корень один раз пишется в `darwin` из TWRP: `tools/raphael-write-darwin.py ~/ios26-root-raphael.img`
 (кусками по 32 МиБ с проверкой; повторный запуск дописывает только отличия).
 
-Загрузочный образ и прошивка (телефон в fastboot):
+### Текущая рабочая сборка (16.11.2026)
+
+| Часть | Версия | Сборка CI | Артефакт |
+| --- | --- | --- | --- |
+| Ядро | `xnu-12377.121.6` + патчи до `0187` | [43587278650](https://github.com/timeto2025/IOS-26-Hot-raphael/actions/runs/43587278650) | `xnu-kernel` |
+| HotMetal2 | AdrenoMetal + Turnip UniXNU `d8210e0` (`GPUABI=2`) | [43583341137](https://github.com/timeto2025/IOS-26-Hot-raphael/actions/runs/43583341137) | `ios-userland` |
+| Wi-Fi, звук, Bluetooth | `raphael-tools` | [43536278788](https://github.com/timeto2025/IOS-26-Hot-raphael/actions/runs/43536278788) | `raphael-tools` |
+| Базовый userland | IOS-26-Hot `v0.8.1-ios26` | релиз исходного проекта | `ios-userland-hot-v0.8.1.tar.gz` |
+
+Артефакты GitHub Actions хранятся ограниченное время; если они истекли, перезапустите workflow на той же ветке.
+
+Скачать сборки, собрать загрузочный образ и прошить (телефон в fastboot: питание ~15 с, затем питание + громкость
+вниз). Подставьте свои значения в `<…>`:
 
 ```
-cd ~/IOS-26-Hot-raphael && GPUABI=2 METAL2_FROM=<ios-userland.tar.gz из ci/adrenometal> EXTRA_ARGS="raphgpool=324" REDUCE_FX=1 AUDIO=1 BT_ADDR=<адрес BT> WLAN_CONF=~/wlan.conf WIFI=1 EXTRA_USERLAND=<raphael-tools.tar.gz> GPUFW=~/raphael-gpufw tools/raphael-ios-boot.sh <kernel.development.sweet> ~/Downloads/ios-userland-hot-v0.8.1.tar.gz ~/ios26-root-raphael.img <recovery.img для raphael> 2>&1 | tee ~/build.log && fastboot flash recovery shim/out/raphael-ios-avb.img && fastboot reboot recovery
+cd ~/IOS-26-Hot-raphael && git pull --ff-only && gh run download 43587278650 -R timeto2025/IOS-26-Hot-raphael -n xnu-kernel -D ~/Downloads/xnu-0187 && gh run download 43583341137 -R timeto2025/IOS-26-Hot-raphael -n ios-userland -D ~/Downloads/ul-v2 && gh run download 43536278788 -R timeto2025/IOS-26-Hot-raphael -n raphael-tools -D ~/Downloads/rt && GPUABI=2 METAL2_FROM=~/Downloads/ul-v2/ios-userland.tar.gz EXTRA_ARGS="raphgpool=324" REDUCE_FX=1 AUDIO=1 BT_ADDR=<адрес BT> WLAN_CONF=~/wlan.conf WIFI=1 EXTRA_USERLAND=~/Downloads/rt/raphael-tools.tar.gz GPUFW=<папка с прошивкой GPU> tools/raphael-ios-boot.sh ~/Downloads/xnu-0187/kernel.development.sweet <ios-userland-hot-v0.8.1.tar.gz> <корневой образ> <recovery.img для raphael> 2>&1 | tee ~/build.log && fastboot flash recovery shim/out/raphael-ios-avb.img && fastboot reboot recovery
 ```
+
+Wi-Fi: при загрузке телефон сам подключается к сети из `WLAN_CONF` — текстовый файл из двух строк, `ssid=ИМЯ` и
+`psk=ПАРОЛЬ` (WPA2). Он попадает в образ и на телефон, в git его не класть. Если этой сети нет рядом (например,
+выключена точка доступа), телефон останется без Wi-Fi, а значит и без диагностики по сети.
 
 Основные параметры `tools/raphael-ios-boot.sh` (полный список — в начале скрипта):
 
 | Параметр | Что делает |
 | --- | --- |
-| `WIFI=1`, `WLAN_CONF=` | Wi-Fi и файл с сетью (в git не класть) |
+| `WIFI=1`, `WLAN_CONF=` | Wi-Fi и файл с сетью (`ssid=` / `psk=`, в git не класть) |
 | `AUDIO=1` | Звук |
 | `BT_ADDR=` | Адрес Bluetooth (в git не класть) |
 | `METAL2_FROM=` | Взять `HotMetal2.bundle` из другого архива userland |
