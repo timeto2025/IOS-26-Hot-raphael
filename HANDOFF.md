@@ -5,6 +5,26 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-16 19:40 MSK: xnu 0188 + the new userland flashed: pool halved, vsync hold gains nothing, no fault yet
+Logs: the newest ~/raphael-logs-20261116-19*.tar.gz (9 min of uptime). Image built here at 19:21 (the command of
+README.md with `~/Downloads/xnu-0188`, `METAL2_FROM=~/Downloads/ul-v3/ios-userland.tar.gz`, base `twrp-original.img`,
+MTL2_ENV default = Turnip's cache off); the owner flashed it. Kernel "Mon Nov 16 11:52:30 UTC 2026".
+- **Observed, GPU pool**: backboardd 191 MB at 84 s, 330 MB (peak 347) at 8 min with eight clients after nine app
+  launches; pool 735 of 1268 MB, fail=0. The boot before (0187, 64 MB blocks): backboardd 760 MB, pool 1064 MB at 8 min
+  with four clients. One boot each. The 24 MB blocks (bridge patch 0100) are the only change that touches this.
+- **Observed, no fault**: recoveries=0, 0 crashes, no "SWEET GPU: fault" in 9 min, with Settings scrolled and Maps,
+  Safari, Notes, Weather, App Store, Calendar opened. So the "freed before/after the IB was submitted" line of 0188 is
+  **still unread**, and whether UniXNU's bo-finish fix or the smaller blocks removed the fault is not known (the faults
+  came at 54-461 s in the three boots before; one boot without one proves nothing).
+- **Observed, vsync hold** (`cmd "vsynchold 1"`, Settings scrolled by `swipe`, 5 s windows): off: 123-177 flipped, 6-27
+  drawn over of 132-186 swaps; on: 130-137 flipped, 22-31 drawn over of 146-163 swaps, 45-57 notifications held. No
+  gain: frames are still drawn over with the notifications held, so backboardd does not draw only on them. Left off.
+  This scroll ran 3 submits a frame (450 of 150 swaps, 7.6 ms each, GPU 59-80 %) at 26-37 swaps a second, not the 2
+  submits and 50 swaps of the 14:40 run: the two runs are not comparable (cause not looked for).
+- `ci/xnu-0188` is not merged into master: the fault line is unread. **Next**: 1. keep using the phone until a fault,
+  read its "freed" line (`python3 tools/hot-dbg.py klog --all | grep 'fault'`); 2. why a Settings scroll now takes 3
+  submits a frame; 3. Turnip's cache up to 1 MiB (`MTL2_ENV=""` and `: > /var/local/mtl2-env`); 4. the list below.
+
 ### raphael, 2026-11-16 14:40 MSK: first log of the 0187 kernel: the flip counts every frame, fault report read; xnu 0188, Turnip pin
 Logs: ~/raphael-logs-20261116-142408 (8.5 min of uptime; kernel built 14.11 10:59 UTC = 0186 + 0187, `mtl2-env` =
 `TU_DARWIN_BO_CACHE=0`). Phone at 172.30.104.132. Branches: `ci/xnu-0188` (kernel, not merged), `ci/adrenometal` (userland).
