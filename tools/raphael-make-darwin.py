@@ -7,6 +7,8 @@
     tools/raphael-make-darwin.py --restore DIR      write the saved GPT copies of DIR back
     tools/raphael-make-darwin.py --show             print the table (both copies checked), free entries, free space;
                                                     read only
+    tools/raphael-make-darwin.py --save DIR         save both GPT copies to DIR, to put back with --restore later
+                                                    (Windows can wreck the table when it makes a recovery partition)
     tools/raphael-make-darwin.py GIB --offline DIR  the same plan on DIR/gpt-head.bin + DIR/gpt-tail.bin, no phone;
                                                     writes DIR/gpt-head.new + DIR/gpt-tail.new
 
@@ -289,7 +291,22 @@ def main():
     ap.add_argument('--restore')
     ap.add_argument('--format-data', action='store_true')
     ap.add_argument('--show', action='store_true')
+    ap.add_argument('--save')
     a = ap.parse_args()
+
+    if a.save:
+        in_twrp()
+        head, tail, blocks = load()
+        parse(head, tail, blocks)
+        os.makedirs(a.save, exist_ok=True)
+        for n, d in (('gpt-head.bin', head), ('gpt-tail.bin', tail)):
+            f = os.path.join(a.save, n)
+            if os.path.exists(f):
+                sys.exit(f'{f} exists already: name another directory')
+            open(f, 'wb').write(d)
+        print(f'saved the table of {blocks} blocks in {a.save}  (put it back: '
+              f'tools/raphael-make-darwin.py --restore {a.save})')
+        return
 
     if a.show:
         in_twrp()
