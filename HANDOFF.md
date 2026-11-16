@@ -5,6 +5,78 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-16 19:40 MSK: xnu 0188 + the new userland flashed: pool halved, vsync hold gains nothing, no fault yet
+Logs: the newest ~/raphael-logs-20261116-19*.tar.gz (9 min of uptime). Image built here at 19:21 (the command of
+README.md with `~/Downloads/xnu-0188`, `METAL2_FROM=~/Downloads/ul-v3/ios-userland.tar.gz`, base `twrp-original.img`,
+MTL2_ENV default = Turnip's cache off); the owner flashed it. Kernel "Mon Nov 16 11:52:30 UTC 2026".
+- **Observed, GPU pool**: backboardd 191 MB at 84 s, 330 MB (peak 347) at 8 min with eight clients after nine app
+  launches; pool 735 of 1268 MB, fail=0. The boot before (0187, 64 MB blocks): backboardd 760 MB, pool 1064 MB at 8 min
+  with four clients. One boot each. The 24 MB blocks (bridge patch 0100) are the only change that touches this.
+- **Observed, no fault**: recoveries=0, 0 crashes, no "SWEET GPU: fault" in 9 min, with Settings scrolled and Maps,
+  Safari, Notes, Weather, App Store, Calendar opened. So the "freed before/after the IB was submitted" line of 0188 is
+  **still unread**, and whether UniXNU's bo-finish fix or the smaller blocks removed the fault is not known (the faults
+  came at 54-461 s in the three boots before; one boot without one proves nothing).
+- **Observed, vsync hold** (`cmd "vsynchold 1"`, Settings scrolled by `swipe`, 5 s windows): off: 123-177 flipped, 6-27
+  drawn over of 132-186 swaps; on: 130-137 flipped, 22-31 drawn over of 146-163 swaps, 45-57 notifications held. No
+  gain: frames are still drawn over with the notifications held, so backboardd does not draw only on them. Left off.
+  This scroll ran 3 submits a frame (450 of 150 swaps, 7.6 ms each, GPU 59-80 %) at 26-37 swaps a second, not the 2
+  submits and 50 swaps of the 14:40 run: the two runs are not comparable (cause not looked for).
+- `ci/xnu-0188` is not merged into master: the fault line is unread. **Next**: 1. keep using the phone until a fault,
+  read its "freed" line (`python3 tools/hot-dbg.py klog --all | grep 'fault'`); 2. why a Settings scroll now takes 3
+  submits a frame; 3. Turnip's cache up to 1 MiB (`MTL2_ENV=""` and `: > /var/local/mtl2-env`); 4. the list below.
+
+### raphael, 2026-11-16 14:40 MSK: first log of the 0187 kernel: the flip counts every frame, fault report read; xnu 0188, Turnip pin
+Logs: ~/raphael-logs-20261116-142408 (8.5 min of uptime; kernel built 14.11 10:59 UTC = 0186 + 0187, `mtl2-env` =
+`TU_DARWIN_BO_CACHE=0`). Phone at 172.30.104.132. Branches: `ci/xnu-0188` (kernel, not merged), `ci/adrenometal` (userland).
+- **Observed, 0187 flip**: scrolling Settings by 64 `swipe` commands (GPU 84-91 % busy, backboardd 2 submits a frame at
+  5.9 ms + 1.15 ms present): 246-255 swaps in 5 s, **160-181 flipped + 66-96 drawn over = the swaps**, every window. No
+  frame is lost uncounted any more (0185: 20-89 flipped of 206-279), but about 34 frames a second reach the panel of 50
+  drawn: backboardd draws at every vsync notification, the swap does not wait, the GPU is up to three frames behind and
+  the third present draws over the second. At light load 165 flipped of 166.
+- **Observed, 0186 fault report** (one fault in this boot, 461.578 s, backboardd, after Spotlight closed):
+  "smmu fsr 80000002 far 10025f0300 (read, level 3) ... ended, the GPU goes on", IB1 of fence 10246 from backboardd,
+  "far lies in 10025f0000 + c000, unmapped 28 ms before", far page not mapped. IB2 words 246-251 are
+  CP_SET_DRAW_STATE groups 15 (GMEM) and 16 (SYSMEM), 9 words each, at 10025f0100 and 10025f0240: the input attachment
+  (framebuffer fetch) state of that command buffer, in its sub-stream buffer of 48 KB.
+  - **Not ended in fact**: the CP stayed at the same IB1/IB2 words; "fault 2 ... no fault latched ... reset" 1.0 s later
+    (recoveries=1). backboardd[60] survived the reset (FAULTS=1), nothing restarted. So 0186 saves the processes; the
+    screen still stands for a second.
+  - **Inference from the code** (kernel SweetAccelerator.cpp + Turnip tu_knl_darwin.cc rebuilt from UniXNU's patches): the
+    kernel unmaps a freed buffer only when the last fence submitted *at BoFree* is done, and done was 10245 at the fault,
+    so BoFree came before the kernel saw submit 10246. Turnip retires with its last *submitted* fence too
+    (darwin_bo_finish). So a buffer the recorded command stream names was freed before that stream was submitted. Who
+    frees it (the runtime resetting a command buffer early, or Turnip) is **not known**. "buffer 65 (10025f0000 + 4000)"
+    in the report is a later allocation at the same address (the thread call runs after the first lines).
+- **UniXNU, 2026-11-16 (4a654d1)**: new Mesa patch turnip-darwin-bo-finish-clears-under-lock: darwin_bo_finish zeroed the
+  BO entry after the retire lock, when another thread could already own the handle; "its command stream then sent the GPU
+  to address 0 + offset". That is the fault with far 0 of 14.11 (54.476 s). It does not explain today's far.
+- **xnu 0188 (built: run 43859667209; untested until flashed)**, patch 0188-gpu-free-history-fast-reset-vsync-hold:
+  - BoFree history (256: time, pid, last fence then) and the IB's submit time: the report's new line says
+    "freed before the IB was submitted" or "freed after the IB was submitted". The first is the client's error, the
+    second ours.
+  - 150 ms instead of 1000 ms to the reset for 2 s after an ended fault (the longest job seen ran 30 ms).
+  - Vsync hold, **off by default**: `python3 tools/hot-dbg.py cmd "vsynchold 1"` (or boot-arg `sweetvsynchold=1`). While
+    two frames wait for their flip the vsync notification is not sent (at most two in a row), so backboardd does not draw
+    a frame that would be drawn over. Log: "SWEET FB: 5s: N vsync notifications held". Test: scroll Settings with 0 and
+    with 1, compare "flipped" (34 a second now) and the owner's eye. Not known how CoreAnimation takes a missing tick.
+- **Userland on `ci/adrenometal` (untested until flashed)**: UniXNU pin d8210e0 -> 4a654d1 for the Mesa patches (only the
+  patch above is new); `phone/turnip/patches/0101`: only BOs up to 1 MiB are cached (`TU_DARWIN_BO_CACHE_MAX`), the
+  "Next" item 4 of 14.11. To test the cache: remove `/var/local/mtl2-env` (it still says TU_DARWIN_BO_CACHE=0), restart
+  backboardd, watch the pool. Also `phone/metal2/bridge/patches/0100-sweet-24mb-memory-blocks` (see the pool below).
+  Built on `macos-15-intel` (run 43892972238; the arm64 runners did not take the job twice, and
+  tools/build-turnip-ios.sh now finds Homebrew's bison under /usr/local too).
+- **Observed, GPU pool with the cache off**: backboardd 760 MB at 8 min (peak 773), pool 1064 of 1268 MB, fail=0. It
+  grew by 68-70 MB steps at 101-106 s (8 steps) and with every app after. **Read in the runtime** (metal2vulkan 555b13d5
+  + AdrenoMetal's 0040, memory.rs): a pool's next block is as large as all its blocks so far, from 4 MB up to BLOCK_BYTES
+  = 64 MB, plus a sixteenth for images = 68 MB. master's 24 MB patch was not in AdrenoMetal's patch set; it is now 0100
+  on `ci/adrenometal`.
+- **Licences (same day)**: audit in CREDITS.md ("Binaries", "Notices"); `ios-userland.tar.gz` carries `licenses/`.
+  `shim/font.h`: the owner put the question off, do nothing.
+- **Next**: 1. flash 0188 + the new userland; read the next fault's "freed before/after" line; 2. `vsynchold 1` A/B;
+  3. if "freed before": find the free in the runtime (metal2vulkan command buffer reuse) or Turnip, else the kernel's
+  fence accounting; 4. backboardd's pool with 24 MB blocks (was 760 MB at 8 min); 5. GPU time of a frame (2 submits x 5.9 ms for a Settings scroll);
+  6. the 13:40 list's item 4 (USB network, Bluetooth LE, battery temperature, SNTP, Wi-Fi rate).
+
 ### raphael, 2026-11-14 14:10 MSK: live session on the owner's PC: GPU fault, GPU pool, frames lost at the flip; xnu 0186 + 0187
 Phone on xnu 0185 + ul-v2 (GPUABI=2), one boot watched from 34 s to 23 min. Branch `ci/xnu-0187` (not merged to master):
 xnu run 43587278650. Mirrors in ~/raphael-mirrors (76 of 76), kernel tree in ~/raphael-xnu/xnu (commits for 0186, 0187).
