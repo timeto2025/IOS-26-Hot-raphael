@@ -30,7 +30,7 @@ Logs: ~/raphael-logs-20261116-142408 (8.5 min of uptime; kernel built 14.11 10:5
 - **UniXNU, 2026-11-16 (4a654d1)**: new Mesa patch turnip-darwin-bo-finish-clears-under-lock: darwin_bo_finish zeroed the
   BO entry after the retire lock, when another thread could already own the handle; "its command stream then sent the GPU
   to address 0 + offset". That is the fault with far 0 of 14.11 (54.476 s). It does not explain today's far.
-- **xnu 0188 (untested until flashed)**, patch 0188-gpu-free-history-fast-reset-vsync-hold:
+- **xnu 0188 (built: run 43859667209; untested until flashed)**, patch 0188-gpu-free-history-fast-reset-vsync-hold:
   - BoFree history (256: time, pid, last fence then) and the IB's submit time: the report's new line says
     "freed before the IB was submitted" or "freed after the IB was submitted". The first is the client's error, the
     second ours.
@@ -42,15 +42,19 @@ Logs: ~/raphael-logs-20261116-142408 (8.5 min of uptime; kernel built 14.11 10:5
 - **Userland on `ci/adrenometal` (untested until flashed)**: UniXNU pin d8210e0 -> 4a654d1 for the Mesa patches (only the
   patch above is new); `phone/turnip/patches/0101`: only BOs up to 1 MiB are cached (`TU_DARWIN_BO_CACHE_MAX`), the
   "Next" item 4 of 14.11. To test the cache: remove `/var/local/mtl2-env` (it still says TU_DARWIN_BO_CACHE=0), restart
-  backboardd, watch the pool.
+  backboardd, watch the pool. Also `phone/metal2/bridge/patches/0100-sweet-24mb-memory-blocks` (see the pool below).
+  Built on `macos-15-intel` (run 43892972238; the arm64 runners did not take the job twice, and
+  tools/build-turnip-ios.sh now finds Homebrew's bison under /usr/local too).
 - **Observed, GPU pool with the cache off**: backboardd 760 MB at 8 min (peak 773), pool 1064 of 1268 MB, fail=0. It
-  grew by 68-70 MB steps at 101-106 s (8 steps) and with every app after. Guess: the Metal runtime's memory blocks
-  (master's bridge patch 0100-sweet-8mb-memory-blocks is not in AdrenoMetal's patch set used on `ci/adrenometal`).
+  grew by 68-70 MB steps at 101-106 s (8 steps) and with every app after. **Read in the runtime** (metal2vulkan 555b13d5
+  + AdrenoMetal's 0040, memory.rs): a pool's next block is as large as all its blocks so far, from 4 MB up to BLOCK_BYTES
+  = 64 MB, plus a sixteenth for images = 68 MB. master's 24 MB patch was not in AdrenoMetal's patch set; it is now 0100
+  on `ci/adrenometal`.
 - **Licences (same day)**: audit in CREDITS.md ("Binaries", "Notices"); `ios-userland.tar.gz` carries `licenses/`.
   `shim/font.h`: the owner put the question off, do nothing.
 - **Next**: 1. flash 0188 + the new userland; read the next fault's "freed before/after" line; 2. `vsynchold 1` A/B;
   3. if "freed before": find the free in the runtime (metal2vulkan command buffer reuse) or Turnip, else the kernel's
-  fence accounting; 4. the 68 MB blocks; 5. GPU time of a frame (2 submits x 5.9 ms for a Settings scroll);
+  fence accounting; 4. backboardd's pool with 24 MB blocks (was 760 MB at 8 min); 5. GPU time of a frame (2 submits x 5.9 ms for a Settings scroll);
   6. the 13:40 list's item 4 (USB network, Bluetooth LE, battery temperature, SNTP, Wi-Fi rate).
 
 ### raphael, 2026-11-14 14:10 MSK: live session on the owner's PC: GPU fault, GPU pool, frames lost at the flip; xnu 0186 + 0187
