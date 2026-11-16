@@ -3,6 +3,7 @@
  *
  * libhot_media.dylib: mediaserverd companion for iOS 16 on RMX1931 / SWEET.
  * Adapted from HackiOS userland/src/inject_media.c (https://github.com/oosexgang/hackios-xnu-kernel).
+ * Portions Copyright (c) 2025-2026 the HakiOS authors, MIT License (notice in CREDITS.md).
  *
  * Loaded into mediaserverd via kern.exec_inject (0200-rmx1931-hackios-peripherals.patch):
  *   1. Skips +[BWCoreImageFilterRenderer prewarmPortraitFilterVersion:semanticStyleFilters:]

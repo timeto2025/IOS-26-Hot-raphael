@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the native Metal bridge (phone/metal2/bridge/NativeMetalBridge.rs: UniXNU's bridge over the metal2vulkan
-# runtime, MIT) as a static library for iOS 16 arm64.
+# runtime) as a static library for iOS 16 arm64. The bridge is MIT; metal2vulkan and its runtime, linked in here, are
+# GPL-2.0-or-later OR LGPL-3.0-or-later, and so is the archive (CREDITS.md, "Binaries").
 #   tools/build-m2v-bridge.sh [host]
 # Source: work/metal2vulkan = github.com/steelbrain/metal2vulkan 555b13d5 (UniXNU AdrenoMetal's pin) + phone/metal2/bridge/patches
 # (AdrenoMetal's, phone/metal2/ADRENOMETAL_REVISION).

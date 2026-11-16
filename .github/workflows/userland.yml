@@ -264,6 +264,17 @@ jobs:
           cp phone/gpu/out/gpu phone/gpu/out/pmem dist-userland/bin/
           cp phone/tools/out/* dist-userland/bin/
           cp work/userland/stage/* dist-userland/bin/ 2>/dev/null || true
+          # Licence texts and the source pointer travel with the binaries (CREDITS.md, "Binaries").
+          L=dist-userland/licenses; mkdir -p $L
+          cp LICENSE $L/LICENSE.IOS-26-Hot; cp CREDITS.md $L/; cp phone/metal2/bridge/LICENSE $L/LICENSE.NativeMetal-bridge
+          M2V=https://raw.githubusercontent.com/steelbrain/metal2vulkan/555b13d57e09bff70996a88cff64f1275256d5cf
+          for f in LICENSE LICENSE-GPL-2.0 LICENSE-GPL-3.0 LICENSE-LGPL-3.0; do curl -sfL -o $L/metal2vulkan.$f $M2V/$f || echo "licence text not fetched: $f"; done
+          curl -sfL -o $L/LICENSE.dropbear https://raw.githubusercontent.com/mkj/dropbear/DROPBEAR_2024.86/LICENSE || echo "a licence text was not fetched"
+          curl -sfL -o $L/LICENSE.toybox https://raw.githubusercontent.com/landley/toybox/0.8.11/LICENSE || echo "a licence text was not fetched"
+          curl -sfL http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz | tar xzf - -O dash-0.5.12/COPYING > $L/COPYING.dash || echo "a licence text was not fetched"
+          curl -sfL -o $L/LICENSE.mesa.rst https://gitlab.freedesktop.org/mesa/mesa/-/raw/main/docs/license.rst || echo "a licence text was not fetched"
+          printf '%s\n' "Built from https://github.com/$GITHUB_REPOSITORY at commit $GITHUB_SHA." "metal2vulkan: https://github.com/steelbrain/metal2vulkan at 555b13d57e09bff70996a88cff64f1275256d5cf + phone/metal2/bridge/patches." "Mesa (Turnip): fetched and patched by tools/build-turnip-ios.sh with phone/turnip/patches." "HotMetal2.bundle: LGPL-3.0-or-later as a whole; rebuild and relink with tools/build-m2v-bridge.sh." > $L/SOURCE
+          ls -l $L; test -s $L/metal2vulkan.LICENSE-LGPL-3.0
           tar czf ios-userland.tar.gz -C dist-userland .
           ls -lh ios-userland.tar.gz dist-userland/bin dist-userland/Extensions dist-userland/lib dist-userland/HAL dist-userland/Applications
 
