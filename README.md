@@ -12,7 +12,7 @@
 
 > [!CAUTION]
 > **Экспериментальная сборка, не для повседневного использования.** Корневая система iOS записывается в раздел
-> `darwin` (разметка HackiOS) и затирает его. Защита Apple (SEP, подпись кода, PAC) заменена заглушками.
+> `darwin` и затирает его. Защита Apple (SEP, подпись кода, PAC) заменена заглушками.
 > Разделы загрузчика и прошивок (`abl`, `xbl`, `tz`, `modem`, `persist`) **не трогать никогда**, загрузчик не
 > блокировать. Перед началом сохраните копии разделов (`tools/raphael-extract-fw.sh` кладёт их в `backup/`,
 > в git они не попадают: там IMEI и калибровки радио).
@@ -44,8 +44,20 @@
 
 ## Что нужно
 
-- Телефон с разблокированным загрузчиком и разметкой HackiOS (раздел `darwin`). Используется пакет
-  `HackiOS-16.5-raphael-voxelsy`: из него берётся `images/twrp-original.img` как основа загрузочного образа.
+- Телефон с разблокированным загрузчиком.
+- Раздел `darwin` не меньше 28 ГиБ для корня iOS, отрезанный от конца `userdata` (это стирает данные Android).
+  Создать его инструментами этого репозитория пока нельзя: своё средство для разметки ещё не написано, есть только
+  `tools/raphael-move-recovery.py`, который после этого переносит `recovery` в конец диска и увеличивает его до 128 МиБ.
+- TWRP для raphael: любая сборка с `adb` под root, например официальная с [twrp.me](https://twrp.me/xiaomi/xiaomimi9tpro.html).
+  Нужна для записи корня в `darwin`, переноса `recovery` и копирования прошивок; загружается через
+  `fastboot boot <twrp>.img`, прошивать её не обязательно.
+- Образ-основа для загрузочного образа iOS (последний аргумент `tools/raphael-ios-boot.sh`): `recovery.img` для
+  raphael — та же сборка TWRP или `recovery.img` из стоковой прошивки MIUI. Из него берутся заголовок, деревья
+  устройства (DTB) и секция `recovery_dtbo`. Требования: Android boot image версии 1 или 2, ядро `Image.gz` с
+  приложенными DTB, непустая `recovery_dtbo` (без неё загрузчик не запустит образ из раздела `recovery`).
+  Сборщик проверяет это и сообщает, если чего-то нет. Проверено на одной сборке TWRP; официальная TWRP и стоковый
+  `recovery.img` на этом порте ещё не пробовались.
+- `avbtool.py` из AOSP (`platform/external/avb`): положите его в `downloads/avb/avbtool.py` или укажите `AVBTOOL=`.
 - Linux (проверено на Arch): `python3`, `clang`, `lld`, `llvm`, `android-tools` (`fastboot`, `adb`), `gh`.
 - Свой IPSW iOS 26.5.2 (`23F84`) для iPhone 11 Pro и собранный из него корневой образ (см.
   [README-UPSTREAM.md](README-UPSTREAM.md), раздел про корневой образ).
@@ -63,7 +75,7 @@
 Загрузочный образ и прошивка (телефон в fastboot):
 
 ```
-cd ~/IOS-26-Hot-raphael && GPUABI=2 METAL2_FROM=<ios-userland.tar.gz из ci/adrenometal> EXTRA_ARGS="raphgpool=324" REDUCE_FX=1 AUDIO=1 BT_ADDR=<адрес BT> WLAN_CONF=~/wlan.conf WIFI=1 EXTRA_USERLAND=<raphael-tools.tar.gz> GPUFW=~/raphael-gpufw tools/raphael-ios-boot.sh <kernel.development.sweet> ~/Downloads/ios-userland-hot-v0.8.1.tar.gz ~/ios26-root-raphael.img ~/Downloads/HackiOS-16.5-raphael-voxelsy-04112026-V2/images/twrp-original.img 2>&1 | tee ~/build.log && fastboot flash recovery shim/out/raphael-ios-avb.img && fastboot reboot recovery
+cd ~/IOS-26-Hot-raphael && GPUABI=2 METAL2_FROM=<ios-userland.tar.gz из ci/adrenometal> EXTRA_ARGS="raphgpool=324" REDUCE_FX=1 AUDIO=1 BT_ADDR=<адрес BT> WLAN_CONF=~/wlan.conf WIFI=1 EXTRA_USERLAND=<raphael-tools.tar.gz> GPUFW=~/raphael-gpufw tools/raphael-ios-boot.sh <kernel.development.sweet> ~/Downloads/ios-userland-hot-v0.8.1.tar.gz ~/ios26-root-raphael.img <recovery.img для raphael> 2>&1 | tee ~/build.log && fastboot flash recovery shim/out/raphael-ios-avb.img && fastboot reboot recovery
 ```
 
 Основные параметры `tools/raphael-ios-boot.sh` (полный список — в начале скрипта):
@@ -110,5 +122,4 @@ cd ~/IOS-26-Hot-raphael && GPUABI=2 METAL2_FROM=<ios-userland.tar.gz из ci/adr
 [README-UPSTREAM.md](README-UPSTREAM.md) и [CREDITS.md](CREDITS.md). Для raphael взято также:
 [AdrenoMetal](https://github.com/UniXNU/AdrenoMetal) (MIT) и патчи Turnip из [UniXNU](https://github.com/UniXNU/UniXNU),
 исправление часов CoreAudio из [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng) (BSD-2-Clause-Patent),
-таймер 24 МГц из [UniXNU-droidvm](https://github.com/Droid-VM/UniXNU-droidvm), разметка и TWRP из пакета HackiOS для
-raphael. Файлов Apple, Qualcomm и Xiaomi в репозитории нет.
+таймер 24 МГц из [UniXNU-droidvm](https://github.com/Droid-VM/UniXNU-droidvm). Файлов Apple, Qualcomm и Xiaomi в репозитории нет.

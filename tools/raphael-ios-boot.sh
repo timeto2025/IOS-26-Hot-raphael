@@ -7,7 +7,8 @@
 # USERLAND_TAR_GZ   ios-userland-hot-v0.8.1.tar.gz from the IOS-26-Hot v0.8.1-ios26 release
 # ROOT_IMG          the HFSX root built with prepare-rmx1931-from-device.sh build-rootfs,
 #                   already written to the phone's `darwin` partition
-# STOCK_BOOT_IMG    this phone's boot.img, or the HackiOS package's images/twrp-static-base.img
+# STOCK_BOOT_IMG    a recovery.img for raphael (any TWRP build, or MIUI's stock recovery.img): header v1/v2,
+#                   Image.gz with appended DTBs, and a recovery_dtbo section (needed to start from recovery)
 #
 # Root on darwin, writable; Wi-Fi (WIFI=1), Bluetooth (BT=1) and audio (AUDIO=1) opt-in, cellular off.
 # USB Ethernet debugging on by default (sweetusb=2: phone 192.168.7.2, host 192.168.7.1,
@@ -246,9 +247,9 @@ echo
 echo "Boot args: $CMDLINE"
 # AVBTOOL=path/to/avbtool.py: also write OUT-avb.img with an unsigned AVB hash footer for the
 # 128 MiB recovery partition (tools/raphael-move-recovery.py); flash that one to recovery.
-# Use images/twrp-original.img as STOCK_BOOT_IMG for recovery: its recovery_dtbo is kept.
+# For recovery, STOCK_BOOT_IMG must carry a recovery_dtbo (it is kept; mkbootimg_raphael_probe.py warns if not).
 if [[ -z "${AVBTOOL:-}" ]]; then
-	for c in "$ROOT/downloads/avb/avbtool.py" "$HOME"/Downloads/HackiOS-*/tools/scripts/avbtool.py; do
+	for c in "$ROOT/downloads/avb/avbtool.py" "$HOME"/Downloads/avbtool.py; do
 		[[ -f "$c" ]] && { AVBTOOL=$c; break; }
 	done
 fi

@@ -72,6 +72,10 @@ def main():
             if len(rdtbo) != rd_size:
                 die('stock recovery_dtbo is truncated')
             print(f'stock recovery_dtbo: {rd_size} bytes kept')
+    if not rdtbo:
+        print('warning: the base image has no recovery_dtbo: ABL will not start this image from the recovery '
+              'partition (fastboot boot still works). Use a recovery.img for raphael (TWRP or stock MIUI).',
+              file=sys.stderr)
 
     sha = hashlib.sha1()
     for blob in (new_kernel, ramdisk, b''):
