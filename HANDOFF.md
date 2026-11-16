@@ -21,7 +21,8 @@ MTL2_ENV default = Turnip's cache off); the owner flashed it. Kernel "Mon Nov 16
   gain: frames are still drawn over with the notifications held, so backboardd does not draw only on them. Left off.
   This scroll ran 3 submits a frame (450 of 150 swaps, 7.6 ms each, GPU 59-80 %) at 26-37 swaps a second, not the 2
   submits and 50 swaps of the 14:40 run: the two runs are not comparable (cause not looked for).
-- `ci/xnu-0188` is not merged into master: the fault line is unread. **Next**: 1. keep using the phone until a fault,
+- `ci/xnu-0188` is merged into master on the owner's word (2026-11-16, after this boot); the fault line is still unread.
+  `ci/adrenometal` (the userland on the phone) is not merged. **Next**: 1. keep using the phone until a fault,
   read its "freed" line (`python3 tools/hot-dbg.py klog --all | grep 'fault'`); 2. why a Settings scroll now takes 3
   submits a frame; 3. Turnip's cache up to 1 MiB (`MTL2_ENV=""` and `: > /var/local/mtl2-env`); 4. the list below.
 
