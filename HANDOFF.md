@@ -12,9 +12,10 @@ xnu run 43587278650. Mirrors in ~/raphael-mirrors (76 of 76), kernel tree in ~/r
   - **Flashed now, by the last record (14.11)**: xnu 0185 + ul-v2 userland (`GPUABI=2`); `/var/local/mtl2-env` with
     `TU_DARWIN_BO_CACHE=0` is on the phone. Not re-read today: the phone did not answer on TCP 2223 at the saved address.
   - **Verified on the phone**: 0184 + 0185 (the 13:40 entry); the Turnip cache switch by the environment file (one run).
-  - **xnu 0186 + 0187: untested.** Built (run 43587278650, success), not flashed, nothing of them observed on the
-    phone. `ci/xnu-0187` therefore stays unmerged; master is at 0185.
-  - **Left**: the "Next" list below, starting with flashing the 0187 kernel; merge `ci/xnu-0187` into master after that.
+  - **xnu 0186 + 0187: flashed by the owner by hand (reported 2026-11-16), "стало чуть лучше" (slightly better).** No log
+    of this kernel read yet: "flipped" vs swaps while scrolling and any "SWEET GPU: fault N" report are still to be
+    checked. Merged into master on the owner's report (2026-11-16); whether the image had MTL2_ENV is not known.
+  - **Left**: read a log archive of the 0187 kernel (flips while scrolling, fault reports), then the "Next" list below from item 2.
   - Untracked in the owner's clone, left in place, not committed: 12 `git format-patch` files in the root (each equals,
     by patch-id, a commit already on master: 5de7143 ... 66f6338), `raphael-touch-clean.zip` (one of those 12 files),
     a nested clone `IOS-26-Hot-raphael/` (12 levels, each at upstream d249939, clean, nothing unpublished).
