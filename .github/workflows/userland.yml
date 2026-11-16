@@ -34,14 +34,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: work/turnip/build-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib
-          key: turnip-ios-85fda3b3-cd1b9757-${{ runner.os }}-${{ hashFiles('phone/turnip/**', 'tools/build-turnip-ios.sh', 'work/userland/bin/ios-cc') }}
+          key: turnip-ios-85fda3b3-4a654d1f-${{ runner.os }}-${{ hashFiles('phone/turnip/**', 'tools/build-turnip-ios.sh', 'work/userland/bin/ios-cc') }}
 
       - name: Cache metal2vulkan bridge archive (libnative_metal_bridge.a)
         id: cache-m2v-lib
         uses: actions/cache@v4
         with:
           path: work/m2v-bridge/ios/libnative_metal_bridge.a
-          key: m2v-lib-720ef1ce-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
+          key: m2v-lib-555b13d5-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
 
       - name: Cache metal2vulkan Cargo dependencies
         if: steps.cache-m2v-lib.outputs.cache-hit != 'true'
@@ -53,10 +53,10 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             work/m2v-bridge/target
-          key: m2v-cargo-720ef1ce-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
+          key: m2v-cargo-555b13d5-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/**', 'tools/build-m2v-bridge.sh') }}
           restore-keys: |
-            m2v-cargo-720ef1ce-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/patches/**', 'tools/build-m2v-bridge.sh') }}
-            m2v-cargo-720ef1ce-${{ runner.os }}-
+            m2v-cargo-555b13d5-${{ runner.os }}-${{ hashFiles('phone/metal2/bridge/patches/**', 'tools/build-m2v-bridge.sh') }}
+            m2v-cargo-555b13d5-${{ runner.os }}-
 
       - name: Cache SSH shell tools (dash, dropbearmulti, toybox)
         id: cache-shell
@@ -123,10 +123,10 @@ jobs:
       - name: Build Mesa Turnip (libvulkan_freedreno.dylib) for iOS 16 arm64
         if: steps.cache-turnip.outputs.cache-hit != 'true'
         run: |
-          # UniXNU pinned at cd1b975 (the cache key's cd1b9757): its later turnip-darwin-kmd.patch needs the kernel ABI v2
+          # UniXNU pinned at 4a654d1 (the cache key's 4a654d1f; d8210e0 + turnip-darwin-bo-finish-clears-under-lock): its Turnip speaks the kernel ABI v2 (xnu 0185, GPUABI=2)
           # (SetPriority/Note methods, OwnedCoherent/MemoryPressure params, 128 IBs) that SweetAccelerator does not have yet.
           git init -q reference-repos/UniXNU
-          git -C reference-repos/UniXNU fetch --depth 1 https://github.com/UniXNU/UniXNU.git cd1b9757fd5d730bf85aabb37a4bce729ede9e58
+          git -C reference-repos/UniXNU fetch --depth 1 https://github.com/UniXNU/UniXNU.git 4a654d1f31662f18ab94391a4f0297b17b9bb2fe
           git -C reference-repos/UniXNU checkout -q FETCH_HEAD
           mkdir -p work/turnip
           git init -q work/turnip/mesa
@@ -145,6 +145,7 @@ jobs:
               else:
                   print("Skipped (not needed for runtime dylib):", rel, r.stderr.strip())
           assert os.path.exists("work/turnip/mesa/src/freedreno/vulkan/tu_knl_darwin.cc"), "tu_knl_darwin.cc missing!"
+          assert "const struct tu_bo gone = *bo;" in open("work/turnip/mesa/src/freedreno/vulkan/tu_knl_darwin.cc").read(), "bo-finish fix not applied"
           PY
           for p in phone/turnip/patches/*.patch; do
             git -C work/turnip/mesa apply "$PWD/$p"
@@ -158,7 +159,7 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal --target aarch64-apple-ios
           git init -q work/metal2vulkan
-          git -C work/metal2vulkan fetch --depth 1 https://github.com/steelbrain/metal2vulkan.git 720ef1ce9ae2a2068999a8675717418b9416283e
+          git -C work/metal2vulkan fetch --depth 1 https://github.com/steelbrain/metal2vulkan.git 555b13d57e09bff70996a88cff64f1275256d5cf
           git -C work/metal2vulkan checkout -q FETCH_HEAD
           for p in phone/metal2/bridge/patches/*.patch; do
             git -C work/metal2vulkan apply "$PWD/$p"
@@ -267,13 +268,13 @@ jobs:
           # Licence texts and the source pointer travel with the binaries (CREDITS.md, "Binaries").
           L=dist-userland/licenses; mkdir -p $L
           cp LICENSE $L/LICENSE.IOS-26-Hot; cp CREDITS.md $L/; cp phone/metal2/bridge/LICENSE $L/LICENSE.NativeMetal-bridge
-          M2V=https://raw.githubusercontent.com/steelbrain/metal2vulkan/720ef1ce9ae2a2068999a8675717418b9416283e
+          M2V=https://raw.githubusercontent.com/steelbrain/metal2vulkan/555b13d57e09bff70996a88cff64f1275256d5cf
           for f in LICENSE LICENSE-GPL-2.0 LICENSE-GPL-3.0 LICENSE-LGPL-3.0; do curl -sfL -o $L/metal2vulkan.$f $M2V/$f || echo "licence text not fetched: $f"; done
           curl -sfL -o $L/LICENSE.dropbear https://raw.githubusercontent.com/mkj/dropbear/DROPBEAR_2024.86/LICENSE || echo "a licence text was not fetched"
           curl -sfL -o $L/LICENSE.toybox https://raw.githubusercontent.com/landley/toybox/0.8.11/LICENSE || echo "a licence text was not fetched"
           curl -sfL http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz | tar xzf - -O dash-0.5.12/COPYING > $L/COPYING.dash || echo "a licence text was not fetched"
           curl -sfL -o $L/LICENSE.mesa.rst https://gitlab.freedesktop.org/mesa/mesa/-/raw/main/docs/license.rst || echo "a licence text was not fetched"
-          printf '%s\n' "Built from https://github.com/$GITHUB_REPOSITORY at commit $GITHUB_SHA." "metal2vulkan: https://github.com/steelbrain/metal2vulkan at 720ef1ce9ae2a2068999a8675717418b9416283e + phone/metal2/bridge/patches." "Mesa (Turnip): fetched and patched by tools/build-turnip-ios.sh with phone/turnip/patches." "HotMetal2.bundle: LGPL-3.0-or-later as a whole; rebuild and relink with tools/build-m2v-bridge.sh." > $L/SOURCE
+          printf '%s\n' "Built from https://github.com/$GITHUB_REPOSITORY at commit $GITHUB_SHA." "metal2vulkan: https://github.com/steelbrain/metal2vulkan at 555b13d57e09bff70996a88cff64f1275256d5cf + phone/metal2/bridge/patches." "Mesa (Turnip): fetched and patched by tools/build-turnip-ios.sh with phone/turnip/patches." "HotMetal2.bundle: LGPL-3.0-or-later as a whole; rebuild and relink with tools/build-m2v-bridge.sh." > $L/SOURCE
           ls -l $L; test -s $L/metal2vulkan.LICENSE-LGPL-3.0
           tar czf ios-userland.tar.gz -C dist-userland .
           ls -lh ios-userland.tar.gz dist-userland/bin dist-userland/Extensions dist-userland/lib dist-userland/HAL dist-userland/Applications

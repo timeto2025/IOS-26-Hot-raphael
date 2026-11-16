@@ -24,7 +24,7 @@
 
 extern "C" void sm2_logs(const char *s);
 static void sm2_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-#include "HotPrimeShaders.h"
+/* HotPrimeShaders.h used the legacy frontend's native_bridge_metal_recent_commits; AdrenoMetal primes differently (not ported yet). */
 
 extern "C" void sm2_logs(const char *s)
 {
@@ -238,8 +238,9 @@ static bool listed(void)
 			if (lp && !strcmp(lp, "1"))
 				setenv("METAL2VULKAN_LOG_PIPELINES", "1", 0);
 		}
-		/* Default Adreno 640 GMEM tiling autotune with concurrent binning off (AdrenoMetal@461a8421); overridable via mtl2-env or mtl2-tu-debug */
-		setenv("TU_DEBUG", "nocb", 0);
+		/* AdrenoMetal (phone/metal2/ADRENOMETAL_REVISION): Turnip compiles inside vkCreate*Pipelines on the asking thread, so the
+		 * runtime makes the call there instead of on a thread it starts (0041); concurrent binning stays at Mesa's default (24177ba). */
+		setenv("METAL2VULKAN_COMPILE_ON_ASKING_THREAD", "1", 1);
 		/* debugging: Turnip options for this process from /var/local/mtl2-tu-debug (TU_DEBUG), its log to /var/local/turnip-<proc>.log */
 		{
 			char opts[128] = { 0 };
@@ -285,7 +286,6 @@ static bool listed(void)
 		sm2_log("images: HotMetal2 %p, libvulkan_freedreno %p", self.dli_fbase, tu.dli_fbase);
 		/* backboardd: idle background shader priming (+90 s, QOS_CLASS_BACKGROUND) + optional 10 s telemetry */
 		if (device && !strcmp(getprogname(), "backboardd")) {
-			hot_prime_shaders_start((id<MTLDevice>)device, "/var/local/mtl2-primelist", 90);
 			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
 				for (;;) {
 					sleep(10);

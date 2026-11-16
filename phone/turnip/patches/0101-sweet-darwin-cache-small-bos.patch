@@ -1,0 +1,17 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+index 5d93747..d46ebd6 100644
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -855,7 +855,11 @@ darwin_bo_init(struct tu_device *dev, struct vk_object_base *base,
+    /* TU_DARWIN_BO_CACHE=0 turns the cache off (the host checks of the release paths need every free to reach the kernel). */
+    static const bool cache_enabled = debug_get_bool_option("TU_DARWIN_BO_CACHE", true);
+    /* A lazy BO lies at its sparse VMA's range (darwin_sparse_vma_init) and goes back with that range, never to the cache. */
+-   const bool cacheable = cache_enabled && !(flags & TU_BO_ALLOC_REPLAYABLE) && !lazy_vma;
++   /* Only small BOs are cached (TU_DARWIN_BO_CACHE_MAX bytes, default 1 MiB): the command stream chunks and state buffers a frame
++    * allocates by the hundred. A large BO in its size class costs up to 12.5 % more of a GPU pool that is one fixed block here (a
++    * 68 MB Metal heap block took 80 MB), and waited in the cache for a second while the pool refused other clients. */
++   static const uint64_t cache_max = (uint64_t)debug_get_num_option("TU_DARWIN_BO_CACHE_MAX", 1024 * 1024);
++   const bool cacheable = cache_enabled && size <= cache_max && !(flags & TU_BO_ALLOC_REPLAYABLE) && !lazy_vma;
+    const bool read_only = !!(flags & TU_BO_ALLOC_GPU_READ_ONLY);
+    uint64_t alloc_size = cacheable ? darwin_size_class(size) : size;
+ 

@@ -22,7 +22,9 @@ MTL2_ENV default = Turnip's cache off); the owner flashed it. Kernel "Mon Nov 16
   This scroll ran 3 submits a frame (450 of 150 swaps, 7.6 ms each, GPU 59-80 %) at 26-37 swaps a second, not the 2
   submits and 50 swaps of the 14:40 run: the two runs are not comparable (cause not looked for).
 - `ci/xnu-0188` is merged into master on the owner's word (2026-11-16, after this boot); the fault line is still unread.
-  `ci/adrenometal` (the userland on the phone) is not merged. **Next**: 1. keep using the phone until a fault,
+  `ci/adrenometal` (the userland on the phone, run 43892972238) is merged too, same day: master's userland is now
+  AdrenoMetal + Turnip on kernel ABI v2 (`GPUABI=2` with `METAL2_FROM`; the script's default stays 1 for the v0.8.1
+  base archive). The workflow and bridge patches are the branch's; CREDITS.md keeps master's additions. **Next**: 1. keep using the phone until a fault,
   read its "freed" line (`python3 tools/hot-dbg.py klog --all | grep 'fault'`); 2. why a Settings scroll now takes 3
   submits a frame; 3. Turnip's cache up to 1 MiB (`MTL2_ENV=""` and `: > /var/local/mtl2-env`); 4. the list below.
 

@@ -34,7 +34,7 @@ Nothing from Apple's iOS IPSWs, Google's factory images, Oppo's firmware, or Qua
 
 ## Binaries
 
-- `HotMetal2.bundle` links the metal2vulkan translator and runtime statically. The bundle as a whole is distributed under `LGPL-3.0-or-later` (metal2vulkan's terms; `GPL-2.0-or-later` is its other option). Its complete source is this repository at the commit that built it, metal2vulkan at `720ef1ce9ae2a2068999a8675717418b9416283e` with `phone/metal2/bridge/patches/`, and Mesa with `phone/turnip/patches/`; `tools/build-m2v-bridge.sh` and `tools/build-turnip-ios.sh` rebuild and relink it.
+- `HotMetal2.bundle` links the metal2vulkan translator and runtime statically. The bundle as a whole is distributed under `LGPL-3.0-or-later` (metal2vulkan's terms; `GPL-2.0-or-later` is its other option). Its complete source is this repository at the commit that built it, metal2vulkan at `555b13d57e09bff70996a88cff64f1275256d5cf` with `phone/metal2/bridge/patches/` (UniXNU AdrenoMetal at the commit in `phone/metal2/ADRENOMETAL_REVISION`, `MIT`), and Mesa with `phone/turnip/patches/`; `tools/build-m2v-bridge.sh` and `tools/build-turnip-ios.sh` rebuild and relink it.
 - `ios-userland.tar.gz` carries a `licenses/` directory: this file, the licence texts of the components above and `SOURCE`, which names the commit it was built from.
 - The kernel is XNU with `xnu/patches-26/` under `APSL-2.0`; the patches are its published modifications.
 

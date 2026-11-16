@@ -1,0 +1,18 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index 3c5cdc9..774fa9d 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -168,8 +168,11 @@ use std::time::{Duration, Instant};
+ pub(crate) mod making_parts;
+ mod ready;
+ 
+-/// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
+-pub(super) const BLOCK_BYTES: u64 = 64 << 20;
++/// The size of a pooled block, at most the device's `maxMemoryAllocationSize`. raphael: 24 MB, not 64. The GPU's memory
++/// is one fixed pool of 1268 MB for every process, and a pool's next block is as large as all its blocks so far: with
++/// 64 MB backboardd took the pool in steps of 68 MB (eight of them in 5 s at the first app, 760 MB held at 8 min). A
++/// request past half a block (12 MB) still gets a block of its own size; two full-screen targets of 11.5 MB share one.
++pub(super) const BLOCK_BYTES: u64 = 24 << 20;
+ 
+ /// What a pooled block of images holds past [`BLOCK_BYTES`], as a fraction of it: a sixteenth
+ /// ([`Memory::pooled_bytes`]). A driver's image takes more than its texels: RADV on a Radeon 780M

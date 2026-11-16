@@ -10,7 +10,7 @@ BRIDGE=$ROOT/work/m2v-bridge/ios/libnative_metal_bridge.a
 TURNIP=$ROOT/work/turnip/build-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib
 B=out/HotMetal2.bundle
 rm -rf "$B" && mkdir -p "$B"
-"$CC" -x objective-c++ -std=c++17 -fobjc-arc -O2 -g -Wall -Wno-deprecated-declarations -Wno-unused-function -bundle \
+"$CC" -miphoneos-version-min=17.0 -x objective-c++ -std=c++17 -fobjc-arc -O2 -g -Wall -Wno-deprecated-declarations -Wno-unused-function -bundle \
 	-o "$B/HotMetal2" HotMetal2.mm NativeBridgeMetalFrontend.mm -x none "$BRIDGE" -Wl,-dead_strip -lc++ \
 	-framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation 2>&1 |
 	grep -v "was built for newer 'iOS' version" || true
@@ -23,6 +23,6 @@ strip -x "$B/libvulkan_freedreno.dylib"
 codesign -f -s - "$B/libvulkan_freedreno.dylib" 2>/dev/null
 codesign -f -s - "$B" 2>/dev/null
 "$CC" -O2 -Wall -o out/m2vtest m2vtest.c "$BRIDGE" -Wl,-dead_strip 2>&1 | grep -v "was built for newer" || true
-strip -x out/m2vtest && codesign -f -s - out/m2vtest 2>/dev/null
+[ -f out/m2vtest ] && strip -x out/m2vtest && codesign -f -s - out/m2vtest 2>/dev/null || true
 nm -m "$B/HotMetal2" | grep "weak external" | grep -v "dynamically looked up" || true
 ls -la "$B"
