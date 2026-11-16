@@ -5,6 +5,8 @@
     tools/raphael-make-darwin.py GIB --apply        save both GPT copies to ~/gpt-backup/STAMP, write, read back
     tools/raphael-make-darwin.py --format-data      after a reboot into TWRP: make Android's userdata again
     tools/raphael-make-darwin.py --restore DIR      write the saved GPT copies of DIR back
+    tools/raphael-make-darwin.py --show             print the table (both copies checked), free entries, free space;
+                                                    read only
     tools/raphael-make-darwin.py GIB --offline DIR  the same plan on DIR/gpt-head.bin + DIR/gpt-tail.bin, no phone;
                                                     writes DIR/gpt-head.new + DIR/gpt-tail.new
 
@@ -286,7 +288,32 @@ def main():
     ap.add_argument('--offline')
     ap.add_argument('--restore')
     ap.add_argument('--format-data', action='store_true')
+    ap.add_argument('--show', action='store_true')
     a = ap.parse_args()
+
+    if a.show:
+        in_twrp()
+        head, tail, blocks = load()
+        ph, bh, _, ents = parse(head, tail, blocks)
+        nt = (ph['count'] * ph['esz'] + BS - 1) // BS
+        print(f'disk {blocks} blocks of {BS} ({blocks * BS / 2**30:.2f} GiB); primary table at {ph["ent"]} '
+              f'({ph["count"]} entries, {nt} blocks), first usable {ph["first"]}; backup table at {bh["ent"]}, '
+              f'last usable {ph["last"]}; both copies check out')
+        used = sorted(((i, e) for i, e in enumerate(ents) if e['type'].int), key=lambda x: x[1]['first'])
+        at = ph['first']
+        for i, e in used:
+            if e['first'] > at:
+                print(f'   {"(free)":12s} {at:>10}..{e["first"] - 1:<10} {(e["first"] - at) * BS / 2**20:>10.1f} MiB')
+            print(f'{i + 1:>2} {e["name"]:12s} {e["first"]:>10}..{e["last"]:<10} '
+                  f'{(e["last"] - e["first"] + 1) * BS / 2**20:>10.1f} MiB  {e["type"]}')
+            at = e['last'] + 1
+        if at <= ph['last']:
+            print(f'   {"(free)":12s} {at:>10}..{ph["last"]:<10} {(ph["last"] - at + 1) * BS / 2**20:>10.1f} MiB')
+        free = [i + 1 for i, e in enumerate(ents) if not e['type'].int]
+        print(f'free entries: {len(free)} of {ph["count"]} {free}; room for the primary table before the first '
+              f'usable block: {(ph["first"] - ph["ent"]) * BS // 128} entries; blocks between the last usable '
+              f'block and the backup table: {bh["ent"] - ph["last"] - 1}')
+        return
 
     if a.format_data:
         return format_data()
