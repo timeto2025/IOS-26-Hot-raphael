@@ -8,6 +8,16 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 ### raphael, 2026-11-14 14:10 MSK: live session on the owner's PC: GPU fault, GPU pool, frames lost at the flip; xnu 0186 + 0187
 Phone on xnu 0185 + ul-v2 (GPUABI=2), one boot watched from 34 s to 23 min. Branch `ci/xnu-0187` (not merged to master):
 xnu run 43587278650. Mirrors in ~/raphael-mirrors (76 of 76), kernel tree in ~/raphael-xnu/xnu (commits for 0186, 0187).
+- **State on 2026-11-16 (repository tidy-up, no phone session)**
+  - **Flashed now, by the last record (14.11)**: xnu 0185 + ul-v2 userland (`GPUABI=2`); `/var/local/mtl2-env` with
+    `TU_DARWIN_BO_CACHE=0` is on the phone. Not re-read today: the phone did not answer on TCP 2223 at the saved address.
+  - **Verified on the phone**: 0184 + 0185 (the 13:40 entry); the Turnip cache switch by the environment file (one run).
+  - **xnu 0186 + 0187: untested.** Built (run 43587278650, success), not flashed, nothing of them observed on the
+    phone. `ci/xnu-0187` therefore stays unmerged; master is at 0185.
+  - **Left**: the "Next" list below, starting with flashing the 0187 kernel; merge `ci/xnu-0187` into master after that.
+  - Untracked in the owner's clone, left in place, not committed: 12 `git format-patch` files in the root (each equals,
+    by patch-id, a commit already on master: 5de7143 ... 66f6338), `raphael-touch-clean.zip` (one of those 12 files),
+    a nested clone `IOS-26-Hot-raphael/` (12 levels, each at upstream d249939, clean, nothing unpublished).
 - **Observed: the GPU fault again, another address**: 54.476 s "smmu fsr 2 far 0 fsynr0 30002", ib1 000000130d52c000
   rem 2a8, ib2 0; iconservicesagent[228] restarted. Both boots a read; both boots IB1 lies in the window of
   iconservicesagent (window n = 0x1000000000 + n * 4 GB in the order the clients opened, read from mtl2.log: an inference,
