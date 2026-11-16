@@ -5,6 +5,7 @@
  * between bsd/dev/rmx1931_audio.c, phone/audio/audio_plugin.c
  * (HotAudio.driver), and phone/adsp/adspd.
  * Adapted from HackiOS userland/src/hakios.audio.h (https://github.com/oosexgang/hackios-xnu-kernel).
+ * Portions Copyright (c) 2025-2026 the HakiOS authors, MIT License (notice in CREDITS.md).
  */
 #ifndef _HOT_AUDIO_H_
 #define _HOT_AUDIO_H_

@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: APSL-2.0 (a port of ios-topaz kernel patches, which are under the APSL 2.0)
+ *
  * radio: the WLAN radio after WLFW mission mode, from userland. A port of ios-topaz's TopazModem
  * (patches 0123 and 0125: ath10k snoc.c/ce.c/htc.c/wmi-tlv.c/htt.c for WCN3990) to /dev/pmem:
  *  - apps SMMU: the WLAN stream 0x640 (mask 1) gets a context bank with translation off, the way

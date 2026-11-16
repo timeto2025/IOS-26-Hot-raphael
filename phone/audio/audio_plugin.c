@@ -4,6 +4,7 @@
  * HotAudio.driver: CoreAudio HAL AudioServerPlugIn for iOS 16 & iOS 26
  * (D22AP / D421AP) on RMX1931 / SWEET.
  * Adapted from HackiOS userland/src/audio_plugin.c (https://github.com/oosexgang/hackios-xnu-kernel).
+ * Portions Copyright (c) 2025-2026 the HakiOS authors, MIT License (notice in CREDITS.md).
  *
  * Presents the five built-in devices expected by D421AP's VirtualAudio.plugin
  * routing tables:
