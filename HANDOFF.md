@@ -5,6 +5,46 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-18: Windows on ARM dual-boot alongside iOS; USB OTG power investigated
+A second track: Windows 11 ARM64 installed next to iOS, both on the one phone. iOS is untouched by this (its root is
+in `darwin`, its boot shim in `recovery`).
+
+- **Partition layout now** (`tools/raphael-make-windows.py`, from the full 32/32 GPT, no new entries): `cust`->`esp`
+  (1 GiB, EFI System), `userdata`->`win` (79 GiB, Windows), `darwin` 32 GiB (iOS root, kept), `recovery` 128 MiB
+  (iOS shim). Android is gone. GPT backups in `~/gpt-backup/` on the owner's PC.
+- **Windows install** (done, boots): image Windows 11 26H2 ARM64 (`install.wim` index 3 = Pro) applied to `win` with
+  `dism /apply-image`; drivers from **Project-Aloha/windows_xiaomi_platforms** via `tools/DriverUpdater/AMD64` with
+  `definitions/Desktop/ARM64/Internal/raphael.xml`; `Winre.wim` renamed off (no recovery partition, protects the
+  32/32 GPT); `bcdboot win /s esp /f UEFI` + testsigning/nointegritychecks/recoveryenabled=no. OOBE network wall
+  passed with the offline **BypassNRO** reg key (HKLM\SOFTWARE\...\OOBE\BypassNRO=1, set with hivexregedit on the mounted SOFTWARE hive).
+  Touch works in Windows; **no keyboard** (see USB below), so OOBE/account steps need offline reg edits from Arch.
+- **UEFI**: `xiaomi-raphael_NOSB.img` built by the owner from **Project-Aloha/mu_aloha_platforms** (Actions artifact
+  `uefi-images-xiaomi-raphael`, the `_NOSB` no-secure-boot variant). Flashed to boot via TWRP `msc.sh` mass-storage.
+- **Boot model, the key constraint**: raphael's **`boot` partition enforces AVB** and rejects unsigned images (both
+  the iOS shim AND the UEFI fail from `boot` -> ABL falls back to `recovery`). `recovery` does NOT enforce it, so
+  whatever is in `recovery` boots from both the power button (via fallback) and vol-up. `fastboot boot <uefi>` works
+  (RAM load bypasses AVB). So right now: **Windows via `fastboot boot`**, iOS reflashable to `recovery`. True
+  two-button dual-boot needs AVB disabled: flash **vbmeta with flags=0x3** (VERIFICATION+HASHTREE disabled) — the
+  RMX1931 track did exactly this (HANDOFF entry "vbmeta with flags=0x3 AVB verification disabled"). TODO, with a
+  vbmeta backup first; our `tools/avbtool.py` has the flag constants (VERIFICATION_DISABLED=2, HASHTREE_DISABLED=1).
+- **USB OTG under Windows**: devices need a **powered hub** (phone port gives no VBUS). Investigated:
+  - raphael's `DSDT.aml` is complete — `QCOMFFE1` (URS role switch), `QCOM0582` (Type-C in PMIC), `QCOM057D` (port
+    manager) all present, same as the SM8150 reference (`qcom-hdk8150`) and vayu (where USB works). Not an ACPI gap.
+  - `pnputil /enum-devices /problem` in Windows: our Type-C devices are NOT problem devices (they started). The code
+    28 (FAILED_INSTALL) devices are `NXP1001` (NFC), `QCOM0528`/`QCOM052A`/`QCOM05A4` (camera VFE/flash/MPCS) — all
+    expected-unsupported — and **`QCOM052D` = PMBM, the PMIC battery manager**. Its driver (`qcbattminiclass8150.inf`,
+    claims `ACPI\QCOM052D`) exists in the pack but is **commented out in raphael.xml** ("Not compatible on K20Pro").
+    That is also why the battery charge % does not show.
+  - Type-C VBUS setting found in `qcpmictcc8150.inf`: `DeviceConfig\VbusCtrlMode=1` (+ `VconnCtrlMode=1`, `TrySnk=0`)
+    on `ACPI\QCOM0582`, in `HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\QCOM0582\<inst>\Device Parameters\DeviceConfig`.
+    The `Enum` key is SYSTEM-owned (admin gets "access denied" live), so edit it **offline**: `tools/winusb.py`
+    (hivex) reads/sets it on the mounted `win` SYSTEM hive from Arch.
+  - **Next, in order**: (1) `tools/winusb.py SYSTEM` to report, then try `VbusCtrlMode` 0/2/3 (default 1); (2) if no
+    luck, re-add `qcbattminiclass8150.inf` (fixes the % gauge; may or may not give OTG VBUS — the miniclass is about
+    *reporting* charge, VBUS boost lives deeper in the PMIC charger the devs disabled). Both reversible from Arch.
+- **New tools**: `tools/raphael-make-windows.py` (carve esp/win, keep iOS), `tools/winusb.py` (offline Type-C reg
+  edit), `tools/raphael-make-darwin.py --save/--restore/--show` (GPT backups). `README.md` documents the dual-boot.
+
 ### raphael, 2026-11-16 19:40 MSK: xnu 0188 + the new userland flashed: pool halved, vsync hold gains nothing, no fault yet
 Logs: the newest ~/raphael-logs-20261116-19*.tar.gz (9 min of uptime). Image built here at 19:21 (the command of
 README.md with `~/Downloads/xnu-0188`, `METAL2_FROM=~/Downloads/ul-v3/ios-userland.tar.gz`, base `twrp-original.img`,
