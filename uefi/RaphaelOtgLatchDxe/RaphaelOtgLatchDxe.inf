@@ -22,13 +22,17 @@
   UefiBootServicesTableLib
   UefiLib
   BaseLib
+  BaseMemoryLib
   IoLib
   DebugLib
+  PrintLib
+
+[Protocols]
+  gEfiSimpleFileSystemProtocolGuid        ## CONSUMES (writes raphael-otg.log to the ESP)
 
 #
-# Direct MMIO to the SPMI PMIC-arbiter; no protocol dependency. Depend only on
-# the CPU arch protocol being up (so device MMIO is mapped). Load ordering after
-# SPMIDxe/PmicDxe is enforced via APRIORI (see README), not here.
+# Direct MMIO to the SPMI PMIC-arbiter. The latch runs at ReadyToBoot, so it
+# needs no DEPEX beyond the CPU arch protocol (device MMIO mapped).
 #
 [Depex]
   gEfiCpuArchProtocolGuid
