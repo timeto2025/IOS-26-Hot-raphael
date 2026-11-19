@@ -1,0 +1,43 @@
+name: otgvbus
+
+# Builds the Windows ARM64 kernel driver OtgVbus.sys (keeps pm8150b OTG VBUS on).
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'windows/OtgVbus/**'
+      - '.github/workflows/otgvbus.yml'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install WDK (+ matching SDK and VS driver targets)
+        shell: pwsh
+        run: |
+          choco install windowsdriverkit11 -y --no-progress
+          echo "WDK install exit: $LASTEXITCODE"
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build OtgVbus.sys (ARM64 Release)
+        shell: pwsh
+        working-directory: windows/OtgVbus
+        run: |
+          msbuild OtgVbus.vcxproj /p:Configuration=Release /p:Platform=ARM64 /m `
+            /p:SpectreMitigation=false /p:SignMode=Off
+
+      - name: Show build output
+        shell: pwsh
+        working-directory: windows/OtgVbus
+        run: Get-ChildItem -Recurse bin | Select-Object FullName,Length
+
+      - name: Upload driver
+        uses: actions/upload-artifact@v4
+        with:
+          name: OtgVbus-arm64
+          path: windows/OtgVbus/bin/ARM64/Release/OtgVbus.sys
+          if-no-files-found: error
