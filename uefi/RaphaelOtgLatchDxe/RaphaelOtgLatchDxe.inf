@@ -1,0 +1,34 @@
+## @file
+#  Force the pm8150b OTG (USB VBUS boost) on at boot, for raphael (SM8150).
+#  See RaphaelOtgLatchDxe.c and README.md. UNTESTED until built and flashed.
+##
+
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = RaphaelOtgLatchDxe
+  FILE_GUID      = 66c65e7f-5fca-433a-b95b-af8a974fbf68
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 1.0
+  ENTRY_POINT    = RaphaelOtgLatchDxeEntry
+
+[Sources]
+  RaphaelOtgLatchDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+  BaseLib
+  IoLib
+  DebugLib
+
+#
+# Direct MMIO to the SPMI PMIC-arbiter; no protocol dependency. Depend only on
+# the CPU arch protocol being up (so device MMIO is mapped). Load ordering after
+# SPMIDxe/PmicDxe is enforced via APRIORI (see README), not here.
+#
+[Depex]
+  gEfiCpuArchProtocolGuid

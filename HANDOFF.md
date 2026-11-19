@@ -5,6 +5,32 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-19: OTG VBUS — firmware-level latch drafted in UEFI (UNTESTED)
+Follow-up to the 2026-11-18 "not fixable from our side" conclusion: that holds for the **OS side** (closed Windows
+driver won't assert VBUS), but the boost can be forced **from the open UEFI**, before Windows, independent of the OS
+driver. New driver: **`uefi/RaphaelOtgLatchDxe/`** (source + .inf + README). **UNTESTED — not built, not flashed.**
+- **Mechanism (triple-confirmed):** OTG boost is the pm8150b SMB charger DCDC peripheral, reached over SPMI. Register
+  sequence = mainline `qcom_usb_vbus-regulator.c` for `qcom,pm8150b-vbus-reg`: clear `OTG_EN_SRC_CFG` (0x1153 bit1,
+  drop HW CC/ID gating) → set `OTG_EN` (0x1140 bit0). Base 0x1100 and SID2/periph 0x11 confirmed from raphael's own
+  downstream DTS (`qcom,dcdc@1100`). Addresses: `CMD_OTG` 0x1140, `OTG_CURRENT_LIMIT` 0x1152, `OTG_CFG` 0x1153.
+- **SPMI transport (direct MMIO, PMIC-arb v5):** regions from `sm8150.dtsi` — core 0x0C440000, chnls 0x0C600000
+  (writes, 0x10000·apid), obsrvr 0x0E600000 (reads, 0x80·apid, ee0), cnfg 0x0C40A000 (owner table @0x700). Opcodes
+  EXT_WRITEL=0 / EXT_READL=1, chan regs CMD 0x00 / STATUS 0x08 / WDATA0 0x10 / RDATA0 0x18 — cross-checked against
+  mainline `spmi-pmic-arb.c` + u-boot `spmi-msm.c`. Read half is already proven on this phone (iOS `sweet_spmi.c`,
+  observer-only); this adds the write half. Reused `sp_find_apid` logic.
+- **Key risk — EE ownership:** v5 accepts a write only from the EE that owns the APID (observer reads work from any
+  EE, which is why iOS reads but we never wrote). Driver checks the owner table and **refuses to write unless owner ==
+  EE0**, logging `charger APID owned by EE N` otherwise. Android writes OTG from apps = EE0, so EE0 likely owns it —
+  but the boot log confirms it. Other risks: MMIO region not mapped at ReadyToBoot (add to platform memory map); the
+  Windows driver possibly re-clearing OTG_EN after handoff (then a CC-aware Windows driver is the next, harder step).
+- **Runs at ReadyToBoot** (latest point before OS) so nothing in UEFI re-disables it. Logs `RAPHAEL-OTG:` to UART.
+- **⚠️ Operating rule:** one-shot latch — VBUS stays on until reboot; **do not plug a charger while latched** (two 5V
+  sources fight; rely-on-nothing). Reboot to charge. A CC-gated version (enable on device, disable on charger) is the
+  planned "proper" follow-up and is the only way to charge + OTG without this caveat.
+- **Integration (see README):** copy into `AndromedaPkg/Driver/RaphaelOtgLatchDxe/`, add the .inf to the platform
+  `.dsc` `[Components]` and to raphael `DXE.inc` after `SPMIDxe`. Build `_NOSB`, **back up the target partition, then
+  flash**; rollback = reflash the old UEFI (driver touches no partitions). Next: build in CI, flash, read the boot log.
+
 ### raphael, 2026-11-18: Windows on ARM dual-boot alongside iOS; USB OTG power investigated
 A second track: Windows 11 ARM64 installed next to iOS, both on the one phone. iOS is untouched by this (its root is
 in `darwin`, its boot shim in `recovery`).
