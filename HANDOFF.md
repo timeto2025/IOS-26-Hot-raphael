@@ -5,6 +5,36 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-20: OTG latch CONFIRMED working in UEFI; Windows clears OTG_EN at login
+rev2 of `RaphaelOtgLatchDxe` built (CI `selected_device`, artifact `uefi-images-xiaomi-raphael`) and flashed. The
+driver now logs to `raphael-otg.log` on the `esp` partition (read via TWRP+adb: `mount -t vfat
+/dev/block/bootdevice/by-name/esp /tmp/e; cat /tmp/e/raphael-otg.log`). **The log proves our side works perfectly:**
+```
+PMIC-arb version 0x50000000
+PPID 0x211 -> APID 267, owner EE 0 (our read-EE 0)
+  OTG_CFG clr SRC_CFG (0x53): 0x20 -> 0x20 write Success   (HW gating bit1 already 0)
+  OTG_CURR_LIMIT (0x52): 0x02 -> 0x02 write Success        (1500 mA)
+  CMD_OTG set OTG_EN (0x40): 0x01 -> 0x01 write Success    (OTG_EN was already 1 this boot)
+readback OTG_CFG=0x20 CMD_OTG=0x01 OTG_EN=1 -> VBUS LATCHED ON
+```
+EE0 owns the charger (the ownership worry was unfounded; rev2's "attempt + verify regardless of owner" change
+wasn't needed but is harmless). **Keyboard-backlight timeline confirms it physically:** lit at early boot, lit
+through the Project Aloha (UEFI) logo, **goes dark exactly at the Windows login screen**. So VBUS is on all through
+UEFI and **Windows re-clears OTG_EN during driver init**, dropping it before the OS can use the device. The UEFI
+latch cannot win this — Windows owns the PMIC at runtime.
+- **Role switch already works** (host mode engages, per 2026-11-18 entry), so VBUS is the ONLY missing piece in Windows.
+- **Fix must be Windows-side.** Plan: small Windows ARM64 KMDF driver that re-asserts `OTG_EN` via direct PMIC-arb v5
+  MMIO (same sequence the UEFI driver proved). Concrete target for APID 267: chnls channel = `0x0C600000 + 267*0x10000
+  = 0x0D6B0000`; CMD @ +0x00, STATUS @ +0x08, WDATA0 @ +0x10; write byte to WDATA0, CMD = `(OP_EXT_WRITEL<<27) |
+  (0x40<<4)` to set CMD_OTG(off 0x40) OTG_EN bit0. Observer read channel for verify = `0x0E600000 + 267*0x80`.
+- **Can't just disable the clearing driver:** the VBUS policy lives in `qcpmictcc`/`QCOM0582`, which is also the CC
+  detection driver host mode needs — disabling it would break host-mode detection. Hence a parallel re-assert driver.
+- **Open question for the driver:** does Windows clear `OTG_EN` once (at init -> set-once after load is enough) or on
+  every USB/charger event (-> need a periodic timer re-assert)? Build periodic to be safe.
+- **Supplement, don't replace:** keep `qcpmictcc` for CC detection + host-mode role switch (works); add our driver
+  only to hold VBUS. Replacing `qcpmictcc` wholesale would mean reimplementing the whole pm8150b Type-C controller.
+- testsigning/nointegritychecks already enabled on this Windows (2026-11-18 entry), so a test-signed driver loads.
+
 ### raphael, 2026-11-19: OTG VBUS — firmware-level latch drafted in UEFI (UNTESTED)
 Follow-up to the 2026-11-18 "not fixable from our side" conclusion: that holds for the **OS side** (closed Windows
 driver won't assert VBUS), but the boost can be forced **from the open UEFI**, before Windows, independent of the OS
