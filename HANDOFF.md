@@ -5,6 +5,24 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-20: Windows-side OtgVbus driver — can assert VBUS from Windows, but qcpmictcc fights back
+`windows/OtgVbus/` — tiny ARM64 kernel driver that re-asserts `OTG_EN` via direct PMIC-arb v5 MMIO (charger APID 267,
+chnls 0x0D6B0000, obsrvr 0x0E608580; same sequence the UEFI driver proved). Built in CI (workflow `otgvbus`, artifact
+`OtgVbus-arm64`). Installed offline from Arch: copy `.sys` to `win:/Windows/System32/drivers/`, add service key to the
+SYSTEM hive (Type=1, Start=1, ImagePath=`system32\drivers\OtgVbus.sys`) via hivexregedit — see its README (no keyboard
+in Windows needed).
+- **rev1 result (big):** the keyboard backlight now LIGHTS at the Windows login screen (it never did before) — so we
+  CAN write OTG_EN / assert VBUS from inside Windows. But it then goes dark: **qcpmictcc keeps clearing OTG_EN** and a
+  1 s re-assert loses the race (ping-pong). This is the predicted runtime-override, now reproduced from our side.
+- **rev2 (built, awaiting test):** re-assert every 100 ms + write counters to the service key (`St_Loops`,
+  `St_FoundCleared`, `St_WriteOk`, `St_WriteFail`, `St_LastCmdOtg`, `St_LastOtgCfg`), read offline with `hivexget` (cmd
+  in README). Goal: learn if Windows clears OTG_EN **continuously** (polling can't win → must neutralise the clear in
+  qcpmictcc / find the config that makes it stop) or **on events** (faster re-assert holds).
+- To update the driver: re-expose `win` via TWRP mass-storage, overwrite the `.sys`, reboot (service key persists).
+- Next decision after reading rev2 counters: if continuous-clear, stop fighting the register and instead find WHY
+  qcpmictcc clears it (registry/ACPI config, or which exact event) — possibly make our driver bind-order before it, or
+  patch the policy; if event-driven, just tighten the period / hook the event.
+
 ### raphael, 2026-11-20: OTG latch CONFIRMED working in UEFI; Windows clears OTG_EN at login
 rev2 of `RaphaelOtgLatchDxe` built (CI `selected_device`, artifact `uefi-images-xiaomi-raphael`) and flashed. The
 driver now logs to `raphael-otg.log` on the `esp` partition (read via TWRP+adb: `mount -t vfat
