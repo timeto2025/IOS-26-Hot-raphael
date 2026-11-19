@@ -39,9 +39,17 @@ in `darwin`, its boot shim in `recovery`).
     on `ACPI\QCOM0582`, in `HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\QCOM0582\<inst>\Device Parameters\DeviceConfig`.
     The `Enum` key is SYSTEM-owned (admin gets "access denied" live), so edit it **offline**: `tools/winusb.py`
     (hivex) reads/sets it on the mounted `win` SYSTEM hive from Arch.
-  - **Next, in order**: (1) `tools/winusb.py SYSTEM` to report, then try `VbusCtrlMode` 0/2/3 (default 1); (2) if no
-    luck, re-add `qcbattminiclass8150.inf` (fixes the % gauge; may or may not give OTG VBUS — the miniclass is about
-    *reporting* charge, VBUS boost lives deeper in the PMIC charger the devs disabled). Both reversible from Arch.
+  - **RESOLVED (2026-11-19): OTG bus-power is NOT fixable from our side.** The role switch (`UrsSynopsys`/`QCOM0597`)
+    and Type-C detection work — host mode engages. What never turns on is the **VBUS 5 V boost**, which the closed
+    Qualcomm charger/PMIC driver (pm8150b) does not assert under Windows. `VbusCtrlMode` swept 0/1/2/3 via
+    `tools/winusb.py` — no value made a bus-powered device enumerate (restored to 1). This is platform-wide for
+    SM8150 (a 2022-12 4pda note on this port already said "vbus на sm8150 не пофикшен, OTG ... только через хаб с
+    внешним питанием"); vayu has the same limit, it just keeps the battery gauge driver on. No community fix exists:
+    Linux is still adding OTG-VBUS via dwc3-qcom.c set_role + an OTG regulator in DT (2025-26), which needs open
+    driver source the WoA port doesn't have. **Workaround: powered USB hub.** The one vayu-vs-raphael difference,
+    `qcbattminiclass8150.inf` (`QCOM052D`), is disabled on raphael ("Not compatible on K20Pro") — it only fixes the
+    battery % gauge, not OTG, and may bugcheck; re-add only if the gauge is wanted (reversible via DISM /Remove-Driver
+    from the desktop Windows). `tools/winusb.py all` dumps every ACPI device + its bound driver for this analysis.
 - **New tools**: `tools/raphael-make-windows.py` (carve esp/win, keep iOS), `tools/winusb.py` (offline Type-C reg
   edit), `tools/raphael-make-darwin.py --save/--restore/--show` (GPT backups). `README.md` documents the dual-boot.
 
