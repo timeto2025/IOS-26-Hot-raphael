@@ -21,10 +21,10 @@ def child(h, node, name):
 
 def main():
     path = sys.argv[1]
-    setting = sys.argv[2] if len(sys.argv) > 3 else None
+    setting = sys.argv[2] if len(sys.argv) > 2 else None
     newval = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
-    h = hivex.Hivex(path, write=setting is not None)
+    h = hivex.Hivex(path, write=newval is not None)
     root = h.root()
     sel = child(h, root, 'Select')
     cur = h.value_dword(h.node_get_value(sel, 'Current')) if sel else 1
@@ -34,6 +34,24 @@ def main():
     acpi = child(h, enum, 'ACPI') if enum else None
     if acpi is None:
         sys.exit('no ACPI enumerator in the hive')
+
+    if setting == 'all':
+        rows = []
+        for dev in h.node_children(acpi):
+            hid = h.node_name(dev)
+            for inst in h.node_children(dev):
+                svc = ''
+                for v in h.node_values(inst):
+                    if h.value_key(v) == 'Service':
+                        try:
+                            svc = h.value_string(v)
+                        except Exception:
+                            svc = '?'
+                rows.append((hid, svc))
+        rows.sort()
+        for hid, svc in rows:
+            print('%-10s %s' % (hid, svc if svc else '(no driver)'))
+        return
 
     changed = False
     for hid in HIDS:
