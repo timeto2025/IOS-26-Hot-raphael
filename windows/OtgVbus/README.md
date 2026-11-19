@@ -71,6 +71,27 @@ sc start OtgVbus
 - Воткнуть флешку — определяется ли в проводнике.
 - Логи драйвера (`OTGVBUS: …`) видны в DebugView (режим ядра) или в WinDbg.
 
+## rev2: счётчики в реестре (диагностика пинг-понга)
+
+rev2 переподтверждает `OTG_EN` каждые 100 мс и раз в ~2 с пишет счётчики в свой
+ключ службы. После тестовой сессии прочитать их offline из Arch:
+```
+sudo mount -t ntfs3 -o force <win> /mnt/win
+for v in St_Loops St_FoundCleared St_WriteOk St_WriteFail St_LastCmdOtg St_LastOtgCfg; do
+  printf '%-16s = ' "$v"
+  sudo hivexget /mnt/win/Windows/System32/config/SYSTEM '\ControlSet001\Services\OtgVbus' "$v"
+  echo
+done
+```
+Как читать:
+- `St_FoundCleared` близко к `St_Loops` (почти каждый цикл находил бит сброшенным)
+  → Windows гасит `OTG_EN` **постоянно**, опросом гонку не выиграть — нужен другой
+  подход (нейтрализовать само сбрасывание в `qcpmictcc`).
+- `St_FoundCleared` мало относительно `St_Loops` → гасит **по событиям**, частое
+  переподтверждение должно удержать (можно ещё уменьшить период).
+- `St_WriteFail` > 0 → конфликт за шину SPMI (запись не проходит).
+- `St_LastCmdOtg` бит0 — последнее наблюдённое значение `OTG_EN`.
+
 ## Риски
 
 1. **Гонка с `qcpmictcc`** за канал PMIC-arb. Арбитр сериализует каждую команду, но

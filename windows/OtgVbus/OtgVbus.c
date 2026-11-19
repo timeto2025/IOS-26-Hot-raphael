@@ -4,48 +4,31 @@
 
   Redmi K20 Pro / Mi 9T Pro "raphael", Snapdragon 855 (SM8150), PMIC pm8150b.
 
-  WHY
-    The UEFI driver (RaphaelOtgLatchDxe) proves VBUS can be latched on: at
-    ReadyToBoot OTG_EN reads back 1 and the OTG device gets power (keyboard
-    backlight lit through the UEFI logo). But when Windows loads, the closed
-    Qualcomm Type-C/charger driver (qcpmictcc / ACPI\QCOM0582) re-clears OTG_EN
-    during init, so VBUS drops at the login screen and bus-powered OTG devices
-    die. The role switch (host mode) already works - VBUS is the only missing
-    piece. We do NOT replace the closed driver (it does the CC detection host
-    mode needs); we run alongside it and re-assert OTG_EN.
+  The UEFI driver proved VBUS can be latched; rev1 of this driver proved we can
+  re-assert OTG_EN from *inside Windows* too (the keyboard backlight now lights at
+  the login screen, which it never did before). But it then goes dark again: the
+  closed qcpmictcc keeps clearing OTG_EN, and a 1 s re-assert loses the race.
 
-  WHAT
-    A tiny software-only (non-PnP) kernel driver. It maps the SM8150 SPMI
-    PMIC-arbiter v5 channel for the charger (APID 267 = PPID 0x211) and a system
-    thread re-asserts OTG_EN (pm8150b DCDC CMD_OTG, off 0x40, bit0) every second,
-    writing only when it finds the bit cleared. Same register sequence the UEFI
-    driver verified on this exact phone.
+  rev2: re-assert fast (100 ms) to try to hold VBUS, and record counters into the
+  driver's own service registry key so the dynamics can be read offline from Arch
+  (hivex) - we need to know whether Windows clears OTG_EN continuously (race is
+  unwinnable by polling) or only on events (fast re-assert holds).
 
-  ADDRESSES (confirmed from raphael's DTS + the UEFI driver's ESP log)
-    PMIC-arb v5: chnls 0x0C600000 (+0x10000*apid), obsrvr 0x0E600000 (+0x80*apid).
-    APID 267: chnls channel = 0x0D6B0000, obsrvr channel = 0x0E608580.
-    Channel regs: CMD +0x00, STATUS +0x08, WDATA0 +0x10, RDATA0 +0x18.
-    Write opcode EXT_WRITEL=0, read opcode EXT_READL=1, opcode<<27, off<<4, bc=0.
+  Registers (confirmed on-device): PMIC-arb v5, charger APID 267 (PPID 0x211),
+  chnls 0x0D6B0000, obsrvr 0x0E608580; CMD +0, STATUS +8, WDATA0 +0x10, RDATA0
+  +0x18; write op EXT_WRITEL=0, read op EXT_READL=1, opcode<<27, off<<4, bc=0;
+  OTG_EN = CMD_OTG(off 0x40) bit0; OTG_EN_SRC_CFG = OTG_CFG(off 0x53) bit1.
 
-  RISKS (see README)
-    - Direct MMIO to a channel the closed driver also uses: the arbiter
-      serializes each command, but a write that lands mid-transaction of the
-      other driver could disturb it. Window is tiny (us) and we poke ~1/s.
-    - If Windows drives OTG_EN=0 continuously we ping-pong (VBUS flickers);
-      if it clears once at init, our re-assert wins and holds.
-    - One-shot latch semantics still apply: do NOT charge the phone over the
-      port while VBUS is held on.
-    UNTESTED until built and loaded.
+  Risks: direct MMIO to a channel the closed driver also uses (arbiter serializes
+  each command; a collision could disturb a transaction - window is us). Do NOT
+  charge over the port while VBUS is held. UNTESTED knobs until loaded.
 
 --*/
 
 #include <ntddk.h>
 
-//
-// PMIC-arb v5 channel physical addresses for the charger APID (267).
-//
-#define CHNLS_PA    0x0D6B0000ULL    // 0x0C600000 + 267 * 0x10000
-#define OBSRVR_PA   0x0E608580ULL    // 0x0E600000 + 267 * 0x80
+#define CHNLS_PA    0x0D6B0000ULL
+#define OBSRVR_PA   0x0E608580ULL
 #define CH_LEN      0x20
 
 #define PA_CMD      0x00
@@ -65,20 +48,27 @@
 #define OTG_EN_SRC_CFG_BIT  0x02u
 
 #define SPMI_POLL           1000
-#define REASSERT_PERIOD_MS  1000
+#define REASSERT_PERIOD_MS  100
+#define REGLOG_EVERY_LOOPS  20       // ~ every 2 s
 
 static volatile UCHAR *gChnls;
 static volatile UCHAR *gObsrvr;
 static PKTHREAD        gThread;
 static BOOLEAN         gStop;
 static KEVENT          gStopEvt;
+static HANDLE          gKey;         // our service registry key, for counters
+
+// counters (single writer: the re-assert thread)
+static ULONG gLoops;
+static ULONG gFoundCleared;
+static ULONG gWriteOk;
+static ULONG gWriteFail;
+static ULONG gLastCmdOtg;
+static ULONG gLastOtgCfg;
 
 #define OTG_LOG(fmt, ...) \
   DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "OTGVBUS: " fmt "\n", ##__VA_ARGS__)
 
-//
-// Read one byte of a charger register via the observer channel.
-//
 static
 NTSTATUS
 SpmiReadByte (
@@ -105,9 +95,6 @@ SpmiReadByte (
   return STATUS_IO_TIMEOUT;
 }
 
-//
-// Write one byte of a charger register via the read/write channel.
-//
 static
 NTSTATUS
 SpmiWriteByte (
@@ -134,10 +121,6 @@ SpmiWriteByte (
   return STATUS_IO_TIMEOUT;
 }
 
-//
-// Ensure software owns VBUS (OTG_EN_SRC_CFG clear) and OTG_EN is set.
-// Writes only when a bit is found wrong, to minimise bus traffic.
-//
 static
 VOID
 EnsureOtg (
@@ -146,15 +129,58 @@ EnsureOtg (
 {
   UCHAR  v;
 
-  if (NT_SUCCESS(SpmiReadByte(OFF_OTG_CFG, &v)) && (v & OTG_EN_SRC_CFG_BIT)) {
-    SpmiWriteByte(OFF_OTG_CFG, (UCHAR)(v & ~OTG_EN_SRC_CFG_BIT));
-    OTG_LOG("OTG_CFG had HW gating set, cleared (was 0x%02x)", v);
+  gLoops++;
+
+  if (NT_SUCCESS(SpmiReadByte(OFF_OTG_CFG, &v))) {
+    gLastOtgCfg = v;
+    if (v & OTG_EN_SRC_CFG_BIT) {
+      SpmiWriteByte(OFF_OTG_CFG, (UCHAR)(v & ~OTG_EN_SRC_CFG_BIT));
+    }
   }
 
-  if (NT_SUCCESS(SpmiReadByte(OFF_CMD_OTG, &v)) && !(v & OTG_EN_BIT)) {
-    NTSTATUS st = SpmiWriteByte(OFF_CMD_OTG, (UCHAR)(v | OTG_EN_BIT));
-    OTG_LOG("re-asserted OTG_EN (was 0x%02x, status 0x%08x)", v, (ULONG)st);
+  if (NT_SUCCESS(SpmiReadByte(OFF_CMD_OTG, &v))) {
+    gLastCmdOtg = v;
+    if (!(v & OTG_EN_BIT)) {
+      NTSTATUS st = SpmiWriteByte(OFF_CMD_OTG, (UCHAR)(v | OTG_EN_BIT));
+      gFoundCleared++;
+      if (NT_SUCCESS(st)) {
+        gWriteOk++;
+      } else {
+        gWriteFail++;
+      }
+    }
   }
+}
+
+static
+VOID
+SetDword (
+  _In_ PCWSTR Name,
+  _In_ ULONG  Value
+  )
+{
+  UNICODE_STRING  Vn;
+  ULONG           Data = Value;
+
+  if (gKey == NULL) {
+    return;
+  }
+  RtlInitUnicodeString(&Vn, Name);
+  ZwSetValueKey(gKey, &Vn, 0, REG_DWORD, &Data, sizeof(Data));
+}
+
+static
+VOID
+WriteCounters (
+  VOID
+  )
+{
+  SetDword(L"St_Loops",        gLoops);
+  SetDword(L"St_FoundCleared", gFoundCleared);
+  SetDword(L"St_WriteOk",      gWriteOk);
+  SetDword(L"St_WriteFail",    gWriteFail);
+  SetDword(L"St_LastCmdOtg",   gLastCmdOtg);
+  SetDword(L"St_LastOtgCfg",   gLastOtgCfg);
 }
 
 static
@@ -164,14 +190,20 @@ ReassertThread (
   )
 {
   LARGE_INTEGER  Timeout;
+  ULONG          sinceLog = 0;
 
   UNREFERENCED_PARAMETER(Context);
 
   while (!gStop) {
     EnsureOtg();
+    if (++sinceLog >= REGLOG_EVERY_LOOPS) {
+      WriteCounters();
+      sinceLog = 0;
+    }
     Timeout.QuadPart = -(LONGLONG)REASSERT_PERIOD_MS * 10000;  // relative, 100ns units
     KeWaitForSingleObject(&gStopEvt, Executive, KernelMode, FALSE, &Timeout);
   }
+  WriteCounters();
   PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -191,6 +223,10 @@ OtgVbusUnload (
     ObDereferenceObject(gThread);
     gThread = NULL;
   }
+  if (gKey != NULL) {
+    ZwClose(gKey);
+    gKey = NULL;
+  }
   if (gChnls != NULL) {
     MmUnmapIoSpace((PVOID)gChnls, CH_LEN);
     gChnls = NULL;
@@ -208,13 +244,19 @@ DriverEntry (
   _In_ PUNICODE_STRING RegistryPath
   )
 {
-  PHYSICAL_ADDRESS  Pa;
-  HANDLE            ThreadHandle;
-  NTSTATUS          Status;
-
-  UNREFERENCED_PARAMETER(RegistryPath);
+  PHYSICAL_ADDRESS   Pa;
+  HANDLE             ThreadHandle;
+  NTSTATUS           Status;
+  OBJECT_ATTRIBUTES  Oa;
 
   DriverObject->DriverUnload = OtgVbusUnload;
+
+  // Open our service key for counter output (best-effort).
+  InitializeObjectAttributes(&Oa, RegistryPath,
+                             OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+  if (!NT_SUCCESS(ZwOpenKey(&gKey, KEY_SET_VALUE, &Oa))) {
+    gKey = NULL;
+  }
 
   Pa.QuadPart = CHNLS_PA;
   gChnls = (volatile UCHAR *)MmMapIoSpace(Pa, CH_LEN, MmNonCached);
@@ -224,6 +266,7 @@ DriverEntry (
   if ((gChnls == NULL) || (gObsrvr == NULL)) {
     if (gChnls != NULL)  { MmUnmapIoSpace((PVOID)gChnls, CH_LEN);  gChnls = NULL; }
     if (gObsrvr != NULL) { MmUnmapIoSpace((PVOID)gObsrvr, CH_LEN); gObsrvr = NULL; }
+    if (gKey != NULL)    { ZwClose(gKey); gKey = NULL; }
     OTG_LOG("MmMapIoSpace failed");
     return STATUS_INSUFFICIENT_RESOURCES;
   }
@@ -231,14 +274,12 @@ DriverEntry (
   KeInitializeEvent(&gStopEvt, NotificationEvent, FALSE);
   gStop = FALSE;
 
-  EnsureOtg();  // assert immediately, then the thread keeps it up
+  EnsureOtg();
+  WriteCounters();
 
   Status = PsCreateSystemThread(
-             &ThreadHandle,
-             THREAD_ALL_ACCESS,
-             NULL, NULL, NULL,
-             ReassertThread,
-             NULL
+             &ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL,
+             ReassertThread, NULL
              );
   if (NT_SUCCESS(Status)) {
     ObReferenceObjectByHandle(
@@ -250,6 +291,6 @@ DriverEntry (
     OTG_LOG("PsCreateSystemThread failed 0x%08x (one-shot assert only)", (ULONG)Status);
   }
 
-  OTG_LOG("loaded; charger APID 267, chnls 0x%llx obsrvr 0x%llx", (UINT64)CHNLS_PA, (UINT64)OBSRVR_PA);
+  OTG_LOG("loaded; charger APID 267, period %u ms", REASSERT_PERIOD_MS);
   return STATUS_SUCCESS;
 }
