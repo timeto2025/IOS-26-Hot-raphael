@@ -5,6 +5,22 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-20: OtgVbus rev2 HOLDS VBUS — but device is powered, not enumerated (data layer is next)
+rev2 (100 ms re-assert) WON the race: keyboard backlight now stays lit for a long time -> **VBUS is held on from
+Windows**. The power problem is SOLVED. New blocker one layer up: the powered device does **not enumerate** (keyboard
+backlight on, but keypresses do nothing; re-plugging does not help). So forcing VBUS independent of the Type-C role
+state machine gives power but the **data mux / host role isn't engaged** - D+/D- likely not connected to the host
+(dwc3/xHCI) because the role switch stayed in device mode. Earlier "host mode engages" (2026-11-18) now looks wrong, or
+engages only as a side effect of a proper CC-driven VBUS session we bypassed.
+- **Not yet answered (ask first next session):** does a USB *flash drive* enumerate (appear in Explorer), or also
+  nothing? Flash works -> keyboard is a HID-driver issue; nothing at all -> host/data mux not engaged (most likely).
+- **Next investigation (NOT a power problem):** get the USB host/role path working under Windows. Check in Device
+  Manager (touch + on-screen kbd): is an xHCI host controller present/started for this port? does anything appear
+  (with a code) on attach? Look at the role switch `UrsSynopsys`/`QCOM0597` and whether dwc3 is in host (xHCI) vs
+  device mode. The real fix may be to also drive the role/data mux to host (not just VBUS), i.e. make the Type-C role
+  follow — which is qcpmictcc's job and where we bypassed it. Forcing VBUS without the role may be fundamentally
+  incomplete; may need to cooperate with (not bypass) the CC/role state machine.
+
 ### raphael, 2026-11-20: Windows-side OtgVbus driver — can assert VBUS from Windows, but qcpmictcc fights back
 `windows/OtgVbus/` — tiny ARM64 kernel driver that re-asserts `OTG_EN` via direct PMIC-arb v5 MMIO (charger APID 267,
 chnls 0x0D6B0000, obsrvr 0x0E608580; same sequence the UEFI driver proved). Built in CI (workflow `otgvbus`, artifact
