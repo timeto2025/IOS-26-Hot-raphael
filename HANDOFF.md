@@ -5,6 +5,27 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-20 (CORRECTION): OtgVbus was never loaded until now; prior "Windows driver" behavior was the UEFI latch
+Important correction to the two entries below. The OtgVbus **service key never existed** until 03:05 — the install's
+`.reg` was malformed (hivexregedit `--merge` needs full keys `[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\
+OtgVbus]` with `--prefix 'HKEY_LOCAL_MACHINE\SYSTEM'`, NOT `[\ControlSet001\...]`). The `.sys` was copied but with no
+service key Windows never loaded it. So **all the "VBUS holds / flickers" backlight behavior below was the UEFI
+RaphaelOtgLatchDxe latch, not OtgVbus** — do not trust those as Windows-driver results.
+- **State now:** service key correctly installed in ControlSet001 (Type=1 kernel, Start=1 system, ImagePath
+  `system32\drivers\OtgVbus.sys`), `.sys` in place. OtgVbus should load on next boot — but whether it loads and holds
+  VBUS is **UNTESTED**.
+- **Offline counters are unreliable:** runtime registry writes (our `St_*`) may stay in memory and not flush to the
+  on-disk SYSTEM hive we read offline, especially with Windows fast-startup/hibernation. Empty counters offline do NOT
+  prove the driver didn't run. Better signals: (a) is the keyboard backlight **stably lit on the Windows desktop**
+  (that = OtgVbus holding OTG_EN at runtime, beyond the UEFI window); (b) `powercfg /h off` for a clean hive flush, or
+  read counters only after a real full shutdown.
+- **The real remaining blocker is NOT power:** even with VBUS held, the device is powered-but-not-enumerated (data /
+  host-role layer — see below). VBUS alone was never going to make the keyboard work. Next session's real work is the
+  USB host/role path under Windows (Device Manager / xHCI / UrsSynopsys), not more VBUS tuning.
+- To read/verify offline, `win` must be mounted first (phone in TWRP + msc.sh mass-storage, then
+  `mount -t ntfs3 -o force /dev/disk/by-partlabel/win /mnt/win`); "No such file" for the SYSTEM hive just means win
+  isn't mounted.
+
 ### raphael, 2026-11-20: OtgVbus rev2 HOLDS VBUS — but device is powered, not enumerated (data layer is next)
 rev2 (100 ms re-assert) WON the race: keyboard backlight now stays lit for a long time -> **VBUS is held on from
 Windows**. The power problem is SOLVED. New blocker one layer up: the powered device does **not enumerate** (keyboard
