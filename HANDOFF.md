@@ -5,6 +5,32 @@ test loop, bootloader rules) and `docs/ios-sweet/NOTES.md` (history of every ker
 
 ## Start here (next session)
 
+### raphael, 2026-11-20: ROOT CAUSE of "powered-not-enumerated" — role switch is firmware-handled, never reports host
+Reverse-engineered the closed Windows Type-C drivers (user's request; llvm-objdump, files in a local copy). Findings:
+- **Architecture:** Type-C via Microsoft UCM/UCSI (`qcusbctcpm8150`=UcmTcpciCx client, `qcusbcucsi8150`=UCSI) talking
+  to the PMIC/charger **remote firmware over glink** (`qcpmicglink8150`). Data-role mux (host/device) is the URS stack
+  (`urscx01000` class ext + `urssynopsys` client), ACPI objects `\_SB.URS0/URS1`. `qcpmictcc8150` = PMIC Type-C
+  controller (CC/VBUS), config values `VbusCtrlMode/VconnCtrlMode/TypeCRevision/DbgAccGpioMode`.
+- **Root cause (confirmed by MS UCSI docs):** on UCSI systems role switching is done **in firmware**; the OS URS host
+  stack loads only when the role switch **reports the host role**. raphael's firmware (same broken-OTG one that
+  wouldn't assert VBUS) never reports host → xHCI host stack never loads → device powered but not enumerated. Forcing
+  VBUS alone (OtgVbus) was never going to be enough.
+- **Lever found by RE:** `qcusbcucsi8150.sys` reads two registry values — **`RoleSwitchMode`** and
+  **`OSDefaultRoleSwitchMode`** (via WDF registry query; UNICODE_STRING len 28 / 46 confirmed in disasm at
+  .text+0x40d4 / +0x4180; also used at PAGE+0xabc). These govern role-switch handling (firmware vs OS / default role).
+  Likely under the device hardware key or `HKLM\SYSTEM\ControlSet001\Control\USB\`.
+- **Linux parallels (fix recipes):** `role-switch-default-mode = "host"`; and on Qualcomm DWC3 the role/mode is driven
+  by **QSCRATCH registers in the Qualcomm glue**, not the VBUS line — i.e. host mode can be forced by a register poke
+  like we do for VBUS.
+- **Two paths next:**
+  1. **Registry (cheap, try first):** set `RoleSwitchMode`/`OSDefaultRoleSwitchMode` to make the OS own the role and
+     default to host. Need the INFs (`qcusbcucsi8150.inf` etc.) to read current defaults + valid values, then set
+     offline via hivexregedit and test. INF location: `DriverStore/FileRepository/qcusbcucsi8150.inf_*/`.
+  2. **Register force in our driver (fallback, like VBUS):** force dwc3 host mode via the Qualcomm glue/QSCRATCH or
+     dwc3 GCTL.PrtCapDir. Need the dwc3/glue reg base for SM8150 (not yet pinned from downstream DTS; get from mainline
+     sm8150 usb node or the driver's ACPI _CRS). This is the "add role switching to our driver" the owner asked about.
+- Binaries pulled for RE: qcpmictcc/qcusbctcpm/qcusbcucsi/urssynopsys/qcpmicglink/QcXhciFilter/qcspmi + ufx/urscx.
+
 ### raphael, 2026-11-20 (CORRECTION): OtgVbus was never loaded until now; prior "Windows driver" behavior was the UEFI latch
 Important correction to the two entries below. The OtgVbus **service key never existed** until 03:05 — the install's
 `.reg` was malformed (hivexregedit `--merge` needs full keys `[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\
